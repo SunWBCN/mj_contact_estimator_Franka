@@ -11,8 +11,8 @@ def apply_external_wrench(model: mujoco.MjModel, data: mujoco.MjData, wrench: np
         wrench: Wrench vector to be applied (6D)
         body_name: Body name to which the wrenches will be applied
     """
-    joint_id = model.body(body_name).id
-    data.xfrc_applied[joint_id] = wrench
+    body_id = model.body(body_name).id
+    data.xfrc_applied[body_id] = wrench
 
 def generate_wrench_profile(t: list, wrench_type: str) -> np.ndarray:
     """
