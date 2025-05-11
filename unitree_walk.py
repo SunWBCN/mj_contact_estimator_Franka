@@ -8,7 +8,7 @@ from quad_standalone.policy import Policy
 from quad_standalone.viewer import MujocoViewer
 import pinocchio as pino
 from contact_estimator import high_gain_based_observer, kalman_disturbance_observer
-from mujoco_dyn import compute_gravity_forces
+from utils.mujoco_dyn import compute_gravity_forces
 
 if __name__ == "__main__":
     # Constants

@@ -72,13 +72,17 @@ class WrenchApplier:
             raise ValueError("Wrench profile not initialized. Call _init_wrench_profile() first.")
         
         applied_external_wrench = {}
+        applied_positions = {}
         if self.wrench_profile_index < len(self.t):
             for body_name, wrench in self.wrench_profile.items():
                 apply_external_wrench(self.model, self.data, wrench[self.wrench_profile_index], body_name)
                 applied_external_wrench[body_name] = wrench[self.wrench_profile_index]
+                applied_positions[body_name] = self.data.xpos[self.model.body(body_name).id]
                 
         self.wrench_profile_index += 1
-        return applied_external_wrench
+        is_end = self.wrench_profile_index >= len(self.t)
+        
+        return applied_external_wrench, applied_positions, is_end
         
     def reset(self):
         """

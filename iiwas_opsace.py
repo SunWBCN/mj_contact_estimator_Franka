@@ -4,9 +4,10 @@ import numpy as np
 import time
 import pinocchio as pino
 from contact_estimator import high_gain_based_observer, kalman_disturbance_observer
-from mujoco_dyn import mujocoDyn
+from utils.mujoco_dyn import mujocoDyn
 from external_wrench import WrenchApplier
 from controller import cartesian_impedance_nullspace
+from utils.geom_visualizer import visualize_normal_arrow, reset_scene
 
 # Simulation timestep in seconds.
 dt: float = 0.002
@@ -57,16 +58,19 @@ def main() -> None:
     computed_ext_wrenchs = []
     
     # Generate a wrench profile
-    apply_body_names = ["link6", "attachment"]
-    wrench_applier = WrenchApplier(model, data, "sine", time_stop=2.0, dt=dt, body_names=apply_body_names)
+    apply_body_names = ["link1"]
+    wrench_applier = WrenchApplier(model, data, "sine", time_stop=10.0, dt=dt, body_names=apply_body_names)
     mujoco_dyn = mujocoDyn(model, data)
 
     with mujoco.viewer.launch_passive(
         model=model,
         data=data,
-        show_left_ui=False,
-        show_right_ui=False,
+        # show_left_ui=False,
+        # show_right_ui=False,
     ) as viewer:
+        scene = viewer.user_scn
+        ngeom_init = scene.ngeom
+        
         # Reset the simulation.
         mujoco.mj_resetDataKeyframe(model, data, key_id)
 
@@ -79,7 +83,13 @@ def main() -> None:
             step_start = time.time()
 
             # Apply external wrench to the end-effector.
-            applied_external_wrench = wrench_applier.apply_wrench()
+            applied_external_wrench, applied_positions, is_end = wrench_applier.apply_wrench()
+            reset_scene(scene, ngeom_init)
+            applied_external_forces = [applied_external_wrench[key][: 3] for key in applied_external_wrench.keys()]
+            applied_positions = [applied_positions[key] for key in applied_external_wrench.keys()]
+            # print(is_end, applied_external_wrench, applied_positions)
+            if not is_end and np.linalg.norm(applied_external_forces[0]) > 1e-8:
+                visualize_normal_arrow(scene, applied_positions, applied_external_forces)
             
             # Compute the Coriolis matrix with pinocchio
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
