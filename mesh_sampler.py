@@ -42,7 +42,6 @@ class MeshSampler:
             for mesh_name in self.mesh_names:
                 if mesh_name not in self.data_dict:
                     print(f"Mesh {mesh_name} not found in loaded data.")
-                    exit(0)
     
     def _init_mesh_data(self):
         """
@@ -74,6 +73,10 @@ class MeshSampler:
             geom_ids = get_geom_ids_using_mesh(self.model, mesh_name)
             geom_names = [self.model.geom(i).name for i in geom_ids]
         
+            # skip the meshes that are not able to acts as a contact surface
+            if mesh_name == "band" or mesh_name == "kuka":
+                continue
+        
             data_dict_mesh_i = {}
             for face_i in range(len(faces)):
                 face = faces[face_i]
@@ -87,7 +90,7 @@ class MeshSampler:
                 u = B - A   
                 v = C - A
                 normal = np.cross(u, v)
-                # normal = normal / np.linalg.norm(normal)
+                normal = normal / np.linalg.norm(normal)
                 normal_list.append(normal)
                 face_center_list.append(face_center)
                 rot_mat = compute_arrow_rotation(normal, face_center, A)
@@ -165,14 +168,14 @@ class MeshSampler:
                 update_scene(scene, geom_origin_pos_world, geom_origin_mat_world, geom_pos_local)
             viewer.sync()
     
-    def visualize_normal_arrow(self, mesh_id: int, faces_center_local: np.ndarray = None, arrows_rot_mat_local: np.ndarray = None):
+    def visualize_normal_arrow(self, mesh_id: int, geom_id: int, faces_center_local: np.ndarray = None, arrows_rot_mat_local: np.ndarray = None):
         viewer = mujoco.viewer.launch_passive(self.model, self.data)
         scene = viewer.user_scn
         ngeom_init = scene.ngeom
         rgba = np.array([1.0, 0.0, 0.0, 1.0])
         mesh_name_i = self.mesh_names[mesh_id]
-        geom_ids = self.data_dict[mesh_name_i]["geom_ids"]
-        geom_id = geom_ids[0] # TODO: handle multiple geoms, note that meshes "band", "kuka" are used by link3 and link5
+        # geom_ids = self.data_dict[mesh_name_i]["geom_ids"]
+        # geom_id = geom_ids[0] # TODO: handle multiple geoms, note that meshes "band", "kuka" are used by link3 and link5
         
         if faces_center_local is None or arrows_rot_mat_local is None:
             rot_mat_list = self.data_dict[mesh_name_i]["rot_mat_list"]
@@ -215,8 +218,8 @@ class MeshSampler:
             mujoco.mj_step(self.model, self.data)
             reset_scene(scene)
             for i in range(len(faces_center_local)):
-                face_center_local = faces_center_local[i].tolist()
-                arrow_rot_mat_local = arrows_rot_mat_local[i].tolist()
+                face_center_local = faces_center_local[i]
+                arrow_rot_mat_local = arrows_rot_mat_local[i]
                 update_scene(scene, geom_origin_pos_world, geom_origin_mat_world, face_center_local, arrow_rot_mat_local)
             viewer.sync()
     
@@ -235,11 +238,14 @@ class MeshSampler:
         face_center_list = mesh_data["face_center_list"]
         normal_list = mesh_data["normal_list"]
         rot_mat_list = mesh_data["rot_mat_list"]
+        face_vertices_list = mesh_data["face_vertices_list"]
+        
         idxs = np.random.choice(len(face_center_list), num_samples, replace=False)
         face_center_select = np.array(face_center_list)[idxs]
         normal_select = np.array(normal_list)[idxs]
-        rot_mat_list = np.array(rot_mat_list)[idxs]
-        return face_center_select, normal_select, rot_mat_list
+        rot_mat_select = np.array(rot_mat_list)[idxs]
+        face_vertices_select = np.array(face_vertices_list)[idxs]
+        return face_center_select, normal_select, rot_mat_select, face_vertices_select
 
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
         """
@@ -262,13 +268,15 @@ class MeshSampler:
             raise ValueError(f"No meshes found for body '{body_name}'")     
         mesh_name = mesh_names[0]        
         mesh_id = mesh_ids[0]
-        face_center_select, normal_select, rot_mat_list = self.sample_pos_normal(mesh_name, num_samples)
-        return mesh_id, face_center_select, normal_select, rot_mat_list
+        geom_id = geom_ids[0]
+        face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal(mesh_name, num_samples)
+        return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
         
 if __name__ == "__main__":
     # Example usage
     model = mujoco.MjModel.from_xml_path("kuka_iiwa_14/scene.xml")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
-    mesh_id, faces_center_local, normals_local, rot_mats = mesh_sampler.sample_body_pos_normal("link1", num_samples=5)
-    mesh_sampler.visualize_normal_arrow(mesh_id, faces_center_local, rot_mats)
+    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link5", num_samples=5)
+    print(faces_center_local)
+    mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
