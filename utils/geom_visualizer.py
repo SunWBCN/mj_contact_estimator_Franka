@@ -43,5 +43,4 @@ def visualize_normal_arrow(scene, arrows_pos_world: list, arrows_vec_world: list
             # arrow_pos_ref_world = arrow_pos_world + 0.01 * arrow_pos_world
             arrow_pos_ref_world = arrow_pos_world + 1e-5 * np.random.randn(3)
         arrow_mat_world = compute_arrow_rotation(arrow_vec_world, arrow_pos_world, arrow_pos_ref_world)
-        print(arrow_pos_world, arrow_mat_world)
         update_scene(scene, arrow_pos_world, arrow_mat_world)
