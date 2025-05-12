@@ -87,11 +87,10 @@ def main() -> None:
             reset_scene(scene, ngeom_init)
             applied_external_forces = [applied_external_wrench[key][: 3] for key in applied_external_wrench.keys()]
             applied_positions = [applied_positions[key] for key in applied_external_wrench.keys()]
-            # print(is_end, applied_external_wrench, applied_positions)
             if not is_end and np.linalg.norm(applied_external_forces[0]) > 1e-8:
                 visualize_normal_arrow(scene, applied_positions, applied_external_forces)
             
-            # Compute the Coriolis matrix with pinocchio
+            # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
             # Compute all dynamic matrixes with MuJoCo
             g, M = mujoco_dyn.compute_all_forces()

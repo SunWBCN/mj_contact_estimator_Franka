@@ -36,7 +36,7 @@ class MeshSampler:
         if init_mesh_data:
             self._init_mesh_data()
         else:
-            file_directory = f"{robot_name}/mesh_data"
+            file_directory = f"../{robot_name}/mesh_data"
             self.data_dict = np.load(f"{file_directory}/mesh_data_dict.npy", allow_pickle=True).item()
             print("Mesh data loaded from mesh_data.npy")
             for mesh_name in self.mesh_names:
@@ -274,9 +274,9 @@ class MeshSampler:
         
 if __name__ == "__main__":
     # Example usage
-    model = mujoco.MjModel.from_xml_path("kuka_iiwa_14/scene.xml")
+    model = mujoco.MjModel.from_xml_path("../kuka_iiwa_14/scene.xml")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
-    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link5", num_samples=5)
+    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
     print(faces_center_local)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
