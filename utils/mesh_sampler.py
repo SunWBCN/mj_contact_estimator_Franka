@@ -2,6 +2,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 import trimesh
+from pathlib import Path
 
 def get_geom_ids_using_mesh(model, mesh_name):
     # Get the mesh ID from the name
@@ -36,8 +37,8 @@ class MeshSampler:
         if init_mesh_data:
             self._init_mesh_data()
         else:
-            file_directory = f"../{robot_name}/mesh_data"
-            self.data_dict = np.load(f"{file_directory}/mesh_data_dict.npy", allow_pickle=True).item()
+            xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
+            self.data_dict = np.load(f"{xml_path}/mesh_data_dict.npy", allow_pickle=True).item()
             print("Mesh data loaded from mesh_data.npy")
             for mesh_name in self.mesh_names:
                 if mesh_name not in self.data_dict:
@@ -106,8 +107,8 @@ class MeshSampler:
             data_dict_mesh_i["geom_names"] = geom_names
             data_dict_mesh_i["geom_ids"] = geom_ids
             self.data_dict[mesh_name] = data_dict_mesh_i
-        file_directory = f"{self.robot_name}/mesh_data"
-        file_name = f"{file_directory}/mesh_data_dict.npy"
+        xml_path = (Path(__file__).resolve().parent / ".." / f"{self.robot_name}/mesh_data").as_posix()
+        file_name = f"{xml_path}/mesh_data_dict.npy"
         np.save(file_name, self.data_dict)
         print(f"Mesh data saved to {file_name}")
             
@@ -274,7 +275,9 @@ class MeshSampler:
         
 if __name__ == "__main__":
     # Example usage
-    model = mujoco.MjModel.from_xml_path("../kuka_iiwa_14/scene.xml")
+    robot_name = "kuka_iiwa_14"
+    xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/scene.xml").as_posix()
+    model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
     mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)

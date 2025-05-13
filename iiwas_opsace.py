@@ -7,7 +7,8 @@ from contact_estimator import high_gain_based_observer, kalman_disturbance_obser
 from utils.mujoco_dyn import mujocoDyn
 from external_wrench import WrenchApplier
 from controller import cartesian_impedance_nullspace
-from utils.geom_visualizer import visualize_normal_arrow, reset_scene
+from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
+from utils.mesh_sampler import MeshSampler
 
 # Simulation timestep in seconds.
 dt: float = 0.002
@@ -58,9 +59,12 @@ def main() -> None:
     computed_ext_wrenchs = []
     
     # Generate a wrench profile
-    apply_body_names = ["link1"]
+    apply_body_names = ["link6"]
     wrench_applier = WrenchApplier(model, data, "sine", time_stop=10.0, dt=dt, body_names=apply_body_names)
     mujoco_dyn = mujocoDyn(model, data)
+
+    # Set up the mesh sampler.
+    mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
 
     with mujoco.viewer.launch_passive(
         model=model,
@@ -82,14 +86,21 @@ def main() -> None:
         while viewer.is_running():
             step_start = time.time()
 
-            # Apply external wrench to the end-effector.
-            applied_external_wrench, applied_positions, is_end = wrench_applier.apply_wrench()
+            # # Apply external wrench to the end-effector.
+            # applied_external_wrench, applied_positions, is_end = wrench_applier.apply_predefined_wrench()
+            # reset_scene(scene, ngeom_init)
+            # applied_external_forces = [applied_external_wrench[key][: 3] for key in applied_external_wrench.keys()]
+            # applied_positions = [applied_positions[key] for key in applied_external_wrench.keys()]
+            # if not is_end and np.linalg.norm(applied_external_forces[0]) > 1e-8:
+            #     visualize_normal_arrow(scene, applied_positions, applied_external_forces)
+                
+            # Sample a mesh point and visualize it.
+            mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
+            geom_origin_pos_world = data.geom_xpos[geom_id]        # shape (3,)
+            geom_origin_mat_world = data.geom_xmat[geom_id].reshape(3, 3)  # shape (3,3)
             reset_scene(scene, ngeom_init)
-            applied_external_forces = [applied_external_wrench[key][: 3] for key in applied_external_wrench.keys()]
-            applied_positions = [applied_positions[key] for key in applied_external_wrench.keys()]
-            if not is_end and np.linalg.norm(applied_external_forces[0]) > 1e-8:
-                visualize_normal_arrow(scene, applied_positions, applied_external_forces)
-            
+            visualize_mat_arrows(scene, geom_origin_pos_world, geom_origin_mat_world, faces_center_local, rot_mats)
+                        
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
             # Compute all dynamic matrixes with MuJoCo

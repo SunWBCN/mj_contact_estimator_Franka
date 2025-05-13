@@ -64,7 +64,7 @@ class WrenchApplier:
         self.t = t
         self.wrench_profile = {body_name: wrench_profile for body_name in self.body_names}
     
-    def apply_wrench(self):
+    def apply_predefined_wrench(self):
         """
         Apply the wrench profile to the specified body names.
         """
@@ -79,11 +79,22 @@ class WrenchApplier:
                 applied_external_wrench[body_name] = wrench[self.wrench_profile_index]
                 applied_positions[body_name] = self.data.xpos[self.model.body(body_name).id]
                 
-        self.wrench_profile_index += 1
         is_end = self.wrench_profile_index >= len(self.t)
+        if not is_end:
+            self.wrench_profile_index += 1
         
         return applied_external_wrench, applied_positions, is_end
         
+    def apply_wrench(self, wrench: np.ndarray, body_name: str):
+        """
+        Apply a custom wrench to the specified body name.
+
+        Args:
+            wrench: Wrench vector to be applied (6D)
+            body_name: Body name to which the wrenches will be applied
+        """
+        apply_external_wrench(self.model, self.data, wrench, body_name)
+    
     def reset(self):
         """
         Reset the wrench profile index to 0.
