@@ -63,8 +63,20 @@ def main() -> None:
     wrench_applier = WrenchApplier(model, data, "sine", time_stop=10.0, dt=dt, body_names=apply_body_names)
     mujoco_dyn = mujocoDyn(model, data)
 
-    # Set up the mesh sampler.
+    # Set up the mesh sampler, sample a mesh point.
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
+    mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
+    mesh_sampler.sample_body_pos_normal("link7", num_samples=1)
+    ext_f_norm = 5.0
+    applied_times = 0
+
+    # Settings for visualization
+    arrow_length = 0.1 * ext_f_norm
+    transparent = False
+    if transparent:
+        # Set transparency for all geometries
+        for i in range(model.ngeom):
+            model.geom_rgba[i, 3] = 0.5  # Set alpha (transparency) to 50%
 
     with mujoco.viewer.launch_passive(
         model=model,
@@ -72,6 +84,8 @@ def main() -> None:
         # show_left_ui=False,
         # show_right_ui=False,
     ) as viewer:
+
+        
         scene = viewer.user_scn
         ngeom_init = scene.ngeom
         
@@ -85,21 +99,52 @@ def main() -> None:
         viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
         while viewer.is_running():
             step_start = time.time()
-
-            # # Apply external wrench to the end-effector.
-            # applied_external_wrench, applied_positions, is_end = wrench_applier.apply_predefined_wrench()
-            # reset_scene(scene, ngeom_init)
-            # applied_external_forces = [applied_external_wrench[key][: 3] for key in applied_external_wrench.keys()]
-            # applied_positions = [applied_positions[key] for key in applied_external_wrench.keys()]
-            # if not is_end and np.linalg.norm(applied_external_forces[0]) > 1e-8:
-            #     visualize_normal_arrow(scene, applied_positions, applied_external_forces)
-                
-            # Sample a mesh point and visualize it.
-            mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
-            geom_origin_pos_world = data.geom_xpos[geom_id]        # shape (3,)
-            geom_origin_mat_world = data.geom_xmat[geom_id].reshape(3, 3)  # shape (3,3)
+            
+            # Reset the visualization scene.
             reset_scene(scene, ngeom_init)
-            visualize_mat_arrows(scene, geom_origin_pos_world, geom_origin_mat_world, faces_center_local, rot_mats)
+                
+            # Retrieve the geometry position and rotation matrix.
+            mujoco.mj_forward(model, data)
+            geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
+            rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
+            visualize_mat_arrows(scene, geom_pos_world, rot_mat_geom_world, contact_poss_geom, rots_mat_contact_geom, arrow_length=arrow_length)
+                        
+            # Compute equivalent wrench executing on the CoM of the link.
+            com_pos_world = data.xpos[model.body("link6").id]
+            rot_mat_com_world = data.xmat[model.body("link6").id].reshape(3, 3)
+            equi_ext_fs = []
+            equi_ext_f_poss = []
+            equi_ext_wrenchs = []
+            for i in range(len(rots_mat_contact_geom)):
+                rot_mat_contact_geom = rots_mat_contact_geom[i]
+                rot_mat_contact_world = rot_mat_geom_world @ rot_mat_contact_geom
+                contact_pos_geom = contact_poss_geom[i]
+                contact_pos_world = geom_pos_world + rot_mat_geom_world @ contact_pos_geom
+
+                # Retrive the normal vector
+                normal_vec_geom = normal_vecs_geom[i]     
+                normal_vec_world = rot_mat_geom_world @ normal_vec_geom
+                
+                # Applied force
+                ext_f = normal_vec_world * ext_f_norm
+                com_to_contact_world = contact_pos_world - com_pos_world
+                ext_tau = np.cross(com_to_contact_world, ext_f)
+                ext_wrench = np.concatenate((ext_f, ext_tau))
+                equi_ext_fs.append(ext_f)
+                equi_ext_f_poss.append(com_pos_world)
+                equi_ext_wrenchs.append(ext_wrench)
+                
+            # Visualize the equivalent external forces
+            visualize_normal_arrow(scene, equi_ext_f_poss, equi_ext_fs, rgba=np.array([0.0, 1.0, 0.0, 1.0]), arrow_length=arrow_length)
+
+            # Apply the wrench profile to the specified body names.
+            res = applied_times // 100
+            if res % 2 == 0:
+                wrench_applier.apply_wrench(equi_ext_wrenchs[0], "link6")
+                applied_times += 1
+            elif res % 2 == 1:
+                wrench_applier.apply_wrench(-equi_ext_wrenchs[0], "link6")
+                applied_times += 1
                         
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
@@ -163,6 +208,7 @@ def main() -> None:
     computed_ext_wrenchs = np.array(computed_ext_wrenchs)
     
     import matplotlib.pyplot as plt
+    
     fig = plt.figure(figsize=(10, 5))
     plot_param = 611
     axs_name = ["fx", "fy", "fz", "mx", "my", "mz"]

@@ -92,6 +92,7 @@ class MeshSampler:
                 v = C - A
                 normal = np.cross(u, v)
                 normal = normal / np.linalg.norm(normal)
+                normal = -normal # by default pointing inwards
                 normal_list.append(normal)
                 face_center_list.append(face_center)
                 rot_mat = compute_arrow_rotation(normal, face_center, A)

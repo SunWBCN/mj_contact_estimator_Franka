@@ -12,12 +12,12 @@ def compute_arrow_rotation(d, pos_center, pos_ref):
 def reset_scene(scene, ngeom_init):
     scene.ngeom = ngeom_init
 
-def visualize_normal_arrow(scene, arrows_pos_world: list, arrows_vec_world: list, arrows_pos_ref_world: list = None, arrow_length: float = 0.2):
-    rgba = np.array([1.0, 0.0, 0.0, 1.0])
-        
+def visualize_normal_arrow(scene, arrows_pos_world: list, arrows_vec_world: list, arrows_pos_ref_world: list = None, arrow_length: float = 0.2,
+                           rgba = np.array([1.0, 0.0, 0.0, 1.0])):
+            
     def update_scene(scene, arrow_pos_world, arrow_mat_world):            
         # Create a new geom as an arrow
-        arrow_radius = 0.01 * arrow_length
+        arrow_radius = 0.01 * 0.3 # arrow_length
         arrow_half_length = 0.5 * arrow_length
         size_array = np.array([arrow_radius, arrow_radius, arrow_half_length],
                             dtype=np.float32)
@@ -45,12 +45,12 @@ def visualize_normal_arrow(scene, arrows_pos_world: list, arrows_vec_world: list
         arrow_mat_world = compute_arrow_rotation(arrow_vec_world, arrow_pos_world, arrow_pos_ref_world)
         update_scene(scene, arrow_pos_world, arrow_mat_world)
 
-def visualize_mat_arrows(scene, geom_origin_pos_world: np.ndarray, geom_origin_mat_world: np.ndarray, faces_center_local: np.ndarray, arrows_rot_mat_local: np.ndarray, arrow_length: float=0.2):
-    rgba = np.array([1.0, 0.0, 0.0, 1.0])
+def visualize_mat_arrows(scene, geom_origin_pos_world: np.ndarray, geom_origin_mat_world: np.ndarray, faces_center_local: np.ndarray, arrows_rot_mat_local: np.ndarray, arrow_length: float=0.2,
+                         rgba = np.array([1.0, 0.0, 0.0, 1.0])):
     
     def update_scene(scene, geom_origin_pos_world, geom_origin_mat_world, face_center_local, arrow_rot_mat_local):            
         # Create a new geom as an arrow
-        arrow_radius = 0.01 * arrow_length
+        arrow_radius = 0.01 * 0.3 #arrow_length
         arrow_half_length = 0.5 * arrow_length
         size_array = np.array([arrow_radius, arrow_radius, arrow_half_length],
                             dtype=np.float32)
