@@ -57,9 +57,10 @@ def main() -> None:
     est_ext_taus = []
     gt_ext_taus = []
     computed_ext_wrenchs = []
+    jacs_body = []
     
     # Generate a wrench profile
-    apply_body_names = ["link6"]
+    apply_body_names = ["attachment"]
     wrench_applier = WrenchApplier(model, data, "sine", time_stop=10.0, dt=dt, body_names=apply_body_names)
     mujoco_dyn = mujocoDyn(model, data)
 
@@ -69,6 +70,8 @@ def main() -> None:
     mesh_sampler.sample_body_pos_normal("link7", num_samples=1)
     ext_f_norm = 5.0
     applied_times = 0
+    applied_ext_f = False
+    applied_predefined_wrench = False
 
     # Settings for visualization
     arrow_length = 0.1 * ext_f_norm
@@ -138,14 +141,19 @@ def main() -> None:
             visualize_normal_arrow(scene, equi_ext_f_poss, equi_ext_fs, rgba=np.array([0.0, 1.0, 0.0, 1.0]), arrow_length=arrow_length)
 
             # Apply the wrench profile to the specified body names.
-            res = applied_times // 100
-            if res % 2 == 0:
-                wrench_applier.apply_wrench(equi_ext_wrenchs[0], "link6")
-                applied_times += 1
-            elif res % 2 == 1:
-                wrench_applier.apply_wrench(-equi_ext_wrenchs[0], "link6")
-                applied_times += 1
-                        
+            if applied_ext_f:
+                if applied_predefined_wrench:
+                    if applied_times < 10000:
+                        wrench_applier.apply_predefined_wrench()
+                        applied_times += 1
+                else:
+                    res = applied_times // 100
+                    if res % 2 == 0:
+                        wrench_applier.apply_wrench(equi_ext_wrenchs[0], "link6")
+                        applied_times += 1
+                    elif res % 2 == 1:
+                        wrench_applier.apply_wrench(-equi_ext_wrenchs[0], "link6")
+                        applied_times += 1
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
             # Compute all dynamic matrixes with MuJoCo
@@ -167,6 +175,7 @@ def main() -> None:
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], ee_body_id)
             est_ext_wrench = np.linalg.pinv(jac_body.T) @ est_ext_tau
+            jacs_body.append(jac_body.copy())
 
             # Append the estimated external forces and generalized momentum to the buffer.
             est_ext_wrenches.append(est_ext_wrench.copy())
