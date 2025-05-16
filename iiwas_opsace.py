@@ -9,6 +9,7 @@ from external_wrench import WrenchApplier
 from controller import cartesian_impedance_nullspace
 from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
 from utils.mesh_sampler import MeshSampler
+from utils.qp_solver import QPSolver
 
 # Simulation timestep in seconds.
 dt: float = 0.002
@@ -56,7 +57,8 @@ def main() -> None:
     gt_gms = []
     est_ext_taus = []
     gt_ext_taus = []
-    computed_ext_wrenchs = []
+    computed_gt_ext_taus = []
+    qp_est_ext_wrenches = []
     jacs_body = []
     
     # Generate a wrench profile
@@ -70,8 +72,8 @@ def main() -> None:
     mesh_sampler.sample_body_pos_normal("link7", num_samples=1)
     ext_f_norm = 5.0
     applied_times = 0
-    applied_ext_f = False
-    applied_predefined_wrench = False
+    applied_ext_f = True
+    applied_predefined_wrench = True
 
     # Settings for visualization
     arrow_length = 0.1 * ext_f_norm
@@ -80,6 +82,9 @@ def main() -> None:
         # Set transparency for all geometries
         for i in range(model.ngeom):
             model.geom_rgba[i, 3] = 0.5  # Set alpha (transparency) to 50%
+
+    # Settings for the qp solver
+    solver = QPSolver(model.nv, 1, mu=0.5)
 
     with mujoco.viewer.launch_passive(
         model=model,
@@ -154,8 +159,10 @@ def main() -> None:
                     elif res % 2 == 1:
                         wrench_applier.apply_wrench(-equi_ext_wrenchs[0], "link6")
                         applied_times += 1
+            
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
+            
             # Compute all dynamic matrixes with MuJoCo
             g, M = mujoco_dyn.compute_all_forces()
             
@@ -175,13 +182,15 @@ def main() -> None:
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], ee_body_id)
             est_ext_wrench = np.linalg.pinv(jac_body.T) @ est_ext_tau
-            jacs_body.append(jac_body.copy())
+            qp_est_ext_wrench, loss = solver.solve(jac_body[:3, :], est_ext_tau)
 
             # Append the estimated external forces and generalized momentum to the buffer.
             est_ext_wrenches.append(est_ext_wrench.copy())
             est_gms.append(est_gm.copy())
             gt_ext_wrenches.append(ext_wrench.copy())
             gt_gms.append(gt_gm.copy())
+            qp_est_ext_wrenches.append(qp_est_ext_wrench.copy())
+            jacs_body.append(jac_body.copy())
 
             # Set the control signal and step the simulation.
             np.clip(tau, *model.actuator_ctrlrange.T, out=tau)
@@ -199,8 +208,10 @@ def main() -> None:
             gt_ext_tau = tau_total - tau
             gt_ext_taus.append(gt_ext_tau.copy())
             est_ext_taus.append(est_ext_tau.copy())
-            computed_ext_wrench = np.linalg.pinv(jac_body.T) @ gt_ext_tau
-            computed_ext_wrenchs.append(computed_ext_wrench.copy())
+
+            # Compute the joint space external torques with the jacobian.
+            computed_gt_ext_tau = jac_body.T @ ext_wrench
+            computed_gt_ext_taus.append(computed_gt_ext_tau.copy())
 
             viewer.sync()
             time_until_next_step = dt - (time.time() - step_start)
@@ -214,10 +225,16 @@ def main() -> None:
     gt_ext_wrenches = np.array(gt_ext_wrenches)
     gt_gms = np.array(gt_gms)
     gt_ext_taus = np.array(gt_ext_taus)
-    computed_ext_wrenchs = np.array(computed_ext_wrenchs)
+    qp_est_ext_wrenches = np.array(qp_est_ext_wrenches)
+    computed_gt_ext_taus = np.array(computed_gt_ext_taus)
+    
+    # # Save the data to a file
+    # data_dict = {"gt_ext_wrenches": gt_ext_wrenches, "gt_ext_taus": gt_ext_taus, 
+    #              "jacs_body": jacs_body, "jacs_site": jacs_site,}
+    # np.savez("data.npz", **data_dict)
+    # exit(0)
     
     import matplotlib.pyplot as plt
-    
     fig = plt.figure(figsize=(10, 5))
     plot_param = 611
     axs_name = ["fx", "fy", "fz", "mx", "my", "mz"]
@@ -226,7 +243,10 @@ def main() -> None:
         ax = fig.add_subplot(plot_param)
         ax.plot(t, est_ext_wrenches[:, i], label=f"Estimated External {axs_name[i]}")
         ax.plot(t, gt_ext_wrenches[:, i], label=f"Ground Truth External {axs_name[i]}")
-        ax.plot(t, computed_ext_wrenchs[:, i], label=f"Computed External Torque {axs_name[i]}")
+        if i < 3:
+            ax.plot(t, qp_est_ext_wrenches[:, i], label=f"QP Estimated External {axs_name[i]}")
+        else:
+            ax.plot(t, np.zeros_like(gt_ext_wrenches[:, i]), label=f"QP Estimated External {axs_name[i]}")
         ax.legend()
         plot_param += 1
 
@@ -247,11 +267,11 @@ def main() -> None:
         ax = fig.add_subplot(plot_param)
         ax.plot(t, est_ext_taus[:, i], label=f"Estimated External Torque {axs_name[i]}")
         ax.plot(t, gt_ext_taus[:, i], label=f"Ground Truth External Torque {axs_name[i]}")
+        ax.plot(t, computed_gt_ext_taus[:, i], label=f"Computed External Torque {axs_name[i]}")
         ax.legend()
         plot_param += 1
 
     plt.show()
-
 
 if __name__ == "__main__":
     main()

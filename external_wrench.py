@@ -35,6 +35,7 @@ def generate_wrench_profile(t: list, wrench_type: str) -> np.ndarray:
         wrenches[:, 0] = 0.0 
         wrenches[:, 1] = 0.0
         wrenches[:, 2] = 10.0 * np.sin(2 * np.pi * t)
+        wrenches[:, 2] = np.clip(wrenches[:, 2], 0.0, 100.0)  # Limit the wrench to [-10, 10]
     else:   
         raise ValueError("Invalid wrench type. Choose 'step' or 'sine'.")
     return wrenches
