@@ -3,6 +3,7 @@ import mujoco.viewer
 import numpy as np
 import time
 import pinocchio as pino
+from scipy.spatial.transform import Rotation as R
 from contact_estimator import high_gain_based_observer, kalman_disturbance_observer
 from utils.mujoco_dyn import mujocoDyn
 from external_wrench import WrenchApplier
@@ -10,6 +11,7 @@ from controller import cartesian_impedance_nullspace
 from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
 from utils.mesh_sampler import MeshSampler
 from utils.qp_solver import QPSolver
+from utils.robot_transform import *
 
 # Simulation timestep in seconds.
 dt: float = 0.002
@@ -59,7 +61,7 @@ def main() -> None:
     gt_ext_taus = []
     computed_gt_ext_taus = []
     qp_est_ext_wrenches = []
-    jacs_body = []
+    jacs_site = []
     
     # Generate a wrench profile
     apply_body_names = ["attachment"]
@@ -67,9 +69,11 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
+    sample_body_name = "link7"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
-    mesh_sampler.sample_body_pos_normal("link7", num_samples=1)
+    mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=1)
+    
     ext_f_norm = 5.0
     applied_times = 0
     applied_ext_f = True
@@ -77,7 +81,7 @@ def main() -> None:
 
     # Settings for visualization
     arrow_length = 0.1 * ext_f_norm
-    transparent = False
+    transparent = True
     if transparent:
         # Set transparency for all geometries
         for i in range(model.ngeom):
@@ -116,33 +120,13 @@ def main() -> None:
             geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
             rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
             visualize_mat_arrows(scene, geom_pos_world, rot_mat_geom_world, contact_poss_geom, rots_mat_contact_geom, arrow_length=arrow_length)
-                        
-            # Compute equivalent wrench executing on the CoM of the link.
-            com_pos_world = data.xpos[model.body("link6").id]
-            rot_mat_com_world = data.xmat[model.body("link6").id].reshape(3, 3)
-            equi_ext_fs = []
-            equi_ext_f_poss = []
-            equi_ext_wrenchs = []
-            for i in range(len(rots_mat_contact_geom)):
-                rot_mat_contact_geom = rots_mat_contact_geom[i]
-                rot_mat_contact_world = rot_mat_geom_world @ rot_mat_contact_geom
-                contact_pos_geom = contact_poss_geom[i]
-                contact_pos_world = geom_pos_world + rot_mat_geom_world @ contact_pos_geom
 
-                # Retrive the normal vector
-                normal_vec_geom = normal_vecs_geom[i]     
-                normal_vec_world = rot_mat_geom_world @ normal_vec_geom
-                
-                # Applied force
-                ext_f = normal_vec_world * ext_f_norm
-                com_to_contact_world = contact_pos_world - com_pos_world
-                ext_tau = np.cross(com_to_contact_world, ext_f)
-                ext_wrench = np.concatenate((ext_f, ext_tau))
-                equi_ext_fs.append(ext_f)
-                equi_ext_f_poss.append(com_pos_world)
-                equi_ext_wrenchs.append(ext_wrench)
-                
+            equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
+            mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rots_mat_contact_geom, normal_vecs_geom, sample_body_name, 
+                                                     geom_id, ext_f_norm)
+
             # Visualize the equivalent external forces
+            equi_ext_fs = np.array(equi_ext_wrenchs)[:, :3]
             visualize_normal_arrow(scene, equi_ext_f_poss, equi_ext_fs, rgba=np.array([0.0, 1.0, 0.0, 1.0]), arrow_length=arrow_length)
 
             # Apply the wrench profile to the specified body names.
@@ -154,10 +138,10 @@ def main() -> None:
                 else:
                     res = applied_times // 100
                     if res % 2 == 0:
-                        wrench_applier.apply_wrench(equi_ext_wrenchs[0], "link6")
+                        wrench_applier.apply_wrench(equi_ext_wrenchs[0], apply_body_names[0])
                         applied_times += 1
                     elif res % 2 == 1:
-                        wrench_applier.apply_wrench(-equi_ext_wrenchs[0], "link6")
+                        wrench_applier.apply_wrench(-equi_ext_wrenchs[0], apply_body_names[0])
                         applied_times += 1
             
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
@@ -181,8 +165,10 @@ def main() -> None:
             # Compute the body jacobian for the end-effector.
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], ee_body_id)
-            est_ext_wrench = np.linalg.pinv(jac_body.T) @ est_ext_tau
-            qp_est_ext_wrench, loss = solver.solve(jac_body[:3, :], est_ext_tau)
+            jac_site = np.zeros((6, model.nv))
+            mujoco.mj_jacSite(model, data, jac_site[:3], jac_site[3:], model.site("attachment_site").id)
+            est_ext_wrench = np.linalg.pinv(jac_site.T) @ est_ext_tau
+            qp_est_ext_wrench, loss = solver.solve(jac_site[:3, :], est_ext_tau)
 
             # Append the estimated external forces and generalized momentum to the buffer.
             est_ext_wrenches.append(est_ext_wrench.copy())
@@ -190,7 +176,7 @@ def main() -> None:
             gt_ext_wrenches.append(ext_wrench.copy())
             gt_gms.append(gt_gm.copy())
             qp_est_ext_wrenches.append(qp_est_ext_wrench.copy())
-            jacs_body.append(jac_body.copy())
+            jacs_site.append(jac_site.copy())
 
             # Set the control signal and step the simulation.
             np.clip(tau, *model.actuator_ctrlrange.T, out=tau)
@@ -210,6 +196,7 @@ def main() -> None:
             est_ext_taus.append(est_ext_tau.copy())
 
             # Compute the joint space external torques with the jacobian.
+            # Convert the external wrench to local world aligned coordinates.
             computed_gt_ext_tau = jac_body.T @ ext_wrench
             computed_gt_ext_taus.append(computed_gt_ext_tau.copy())
 
@@ -230,7 +217,7 @@ def main() -> None:
     
     # # Save the data to a file
     # data_dict = {"gt_ext_wrenches": gt_ext_wrenches, "gt_ext_taus": gt_ext_taus, 
-    #              "jacs_body": jacs_body, "jacs_site": jacs_site,}
+    #              "jacs_site": jacs_site, "jacs_site": jacs_site,}
     # np.savez("data.npz", **data_dict)
     # exit(0)
     

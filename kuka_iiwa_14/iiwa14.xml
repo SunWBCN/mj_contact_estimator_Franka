@@ -55,6 +55,10 @@
       <geom class="collision" size="0.08" pos="-0.08 0 0.04"/>
       <geom class="collision" size="0.1" pos="0 0 0.14"/>
       <body name="link1" pos="0 0 0.1575">
+        <site name="link1_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+        <site name="link1_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+        <site name="link1_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+        <site name="link1_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
         <inertial mass="5.76" pos="0 -0.03 0.12" diaginertia="0.0333 0.033 0.0123"/>
         <joint name="joint1" class="joint1"/>
         <geom name="link1_visual" class="visual" mesh="link_1"/>
@@ -64,6 +68,10 @@
         <geom class="collision" size="0.07" pos="0.01 -0.045 0.1025"/>
         <geom class="collision" size="0.07" pos="-0.01 -0.045 0.1025"/>
         <body name="link2" pos="0 0 0.2025" quat="0 0 1 1">
+          <site name="link2_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+          <site name="link2_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+          <site name="link2_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+          <site name="link2_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
           <inertial mass="6.35" pos="0.0003 0.059 0.042" diaginertia="0.0305 0.0304 0.011" quat="0 0 1 1"/>
           <joint name="joint2" class="joint2"/>
           <geom name="link2_visual_orange" class="visual" material="orange" mesh="link_2_orange"/>
@@ -78,6 +86,10 @@
           <geom class="collision" size="0.065" pos="0.01 0.13 0.02"/>
           <geom class="collision" size="0.075" pos="0 0.18 0"/>
           <body name="link3" pos="0 0.2045 0" quat="0 0 1 1">
+            <site name="link3_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+            <site name="link3_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+            <site name="link3_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+            <site name="link3_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
             <inertial mass="3.5" pos="0 0.03 0.13" diaginertia="0.025 0.0238 0.0076"/>
             <joint name="joint3" class="joint1"/>
             <geom name="link3_visual" class="visual" mesh="link_3"/>
@@ -93,6 +105,10 @@
             <geom class="collision" size="0.075" pos="0 0.045 0.2155"/>
             <geom class="collision" size="0.075" pos="0 0 0.2155"/>
             <body name="link4" pos="0 0 0.2155" quat="1 1 0 0">
+              <site name="link4_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+              <site name="link4_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+              <site name="link4_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+              <site name="link4_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
               <inertial mass="3.5" pos="0 0.067 0.034" diaginertia="0.017 0.0164 0.006" quat="1 1 0 0"/>
               <joint name="joint4" class="joint2"/>
               <geom name="link4_visual_orange" class="visual" material="orange" mesh="link_4_orange"/>
@@ -104,6 +120,10 @@
               <geom class="collision" size="0.065" pos="-0.01 0.12 0.034"/>
               <geom class="collision" size="0.075" pos="0 0.184 0"/>
               <body name="link5" pos="0 0.1845 0" quat="0 0 1 1">
+                <site name="link5_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                <site name="link5_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                <site name="link5_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                <site name="link5_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
                 <inertial mass="3.5" pos="0.0001 0.021 0.076" diaginertia="0.01 0.0087 0.00449"/>
                 <joint name="joint5" class="joint1"/>
                 <geom name="link5_visual" class="visual" mesh="link_5"/>
@@ -119,6 +139,10 @@
                 <geom class="collision" size="0.035" pos="-0.012 0.065 0.1855"/>
                 <geom class="collision" size="0.035" pos="0.012 0.065 0.1855"/>
                 <body name="link6" pos="0 0 0.2155" quat="1 1 0 0">
+                  <site name="link6_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                  <site name="link6_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                  <site name="link6_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                  <site name="link6_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
                   <inertial mass="1.8" pos="0 0.0006 0.0004" diaginertia="0.0049 0.0047 0.0036" quat="1 1 0 0"/>
                   <joint name="joint6" class="joint2"/>
                   <geom name="link6_visual_orange" class="visual" material="orange" mesh="link_6_orange"/>
@@ -127,6 +151,10 @@
                   <geom class="collision" size="0.065" pos="0 -0.03 0.011"/>
                   <geom class="collision" size="0.08"/>
                   <body name="link7" pos="0 0.081 0" quat="0 0 1 1">
+                    <site name="link7_dummy_site1" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                    <site name="link7_dummy_site2" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                    <site name="link7_dummy_site3" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
+                    <site name="link7_dummy_site4" pos="0 0 0" quat="0 0 0 1" size="0.01" group="1"/>
                     <inertial mass="1.2" pos="0 0 0.02" diaginertia="0.001 0.001 0.001"/>
                     <joint name="joint7" class="joint3"/>
                     <geom name="link7_visual" class="visual" mesh="link_7"/>
