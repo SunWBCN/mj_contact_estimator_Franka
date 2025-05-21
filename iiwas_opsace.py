@@ -12,6 +12,7 @@ from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize
 from utils.mesh_sampler import MeshSampler
 from utils.qp_solver import QPSolver
 from utils.robot_transform import *
+from contact_particle_filter import ContactParticleFilter
 
 # Simulation timestep in seconds.
 dt: float = 0.002
@@ -71,13 +72,28 @@ def main() -> None:
     # Set up the mesh sampler, sample a mesh point.
     sample_body_name = "link7"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
+    import time
+    start_time = time.time()
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
-    mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=1)
-    
+    mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=100)
+    print("Time taken to sample mesh point:", time.time() - start_time)
+    geom_id = 60
+    contact_poss_geom = np.array([np.array([ 0.00244227, 0.03933891, -0.02926769])])
+    normal_vecs_geom = np.array([np.array([-0.75993156, -0.47094217, 0.44801494])])
+    rots_mat_contact_geom = np.array([
+                            np.array(
+                                        [
+                                        [-0.59587467, -0.25967506, -0.7599316],
+                                        [0.78010535, -0.41187733, -0.4709422],
+                                        [-0.19070667, -0.8734563, 0.44801497]
+                                        ]
+                                     )
+                            ])
     ext_f_norm = 5.0
     applied_times = 0
     applied_ext_f = True
-    applied_predefined_wrench = True
+    applied_predefined_wrench = False
+    contact_pf = ContactParticleFilter(model, data, n_particles=10, robot_name="kuka_iiwa_14", sample_body_name=sample_body_name, ext_f_norm=ext_f_norm)
 
     # Settings for visualization
     arrow_length = 0.1 * ext_f_norm
@@ -97,10 +113,9 @@ def main() -> None:
         # show_right_ui=False,
     ) as viewer:
 
-        
         scene = viewer.user_scn
         ngeom_init = scene.ngeom
-        
+                
         # Reset the simulation.
         mujoco.mj_resetDataKeyframe(model, data, key_id)
 
@@ -121,9 +136,18 @@ def main() -> None:
             rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
             visualize_mat_arrows(scene, geom_pos_world, rot_mat_geom_world, contact_poss_geom, rots_mat_contact_geom, arrow_length=arrow_length)
 
+            # # Compute the equivalent external wrenches to acts on the body.
+            # import time
+            # time_start = time.time()
             equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
             mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rots_mat_contact_geom, normal_vecs_geom, sample_body_name, 
                                                      geom_id, ext_f_norm)
+            # print("Time taken to compute equivalent wrenches:", time.time() - time_start)
+
+            # # Compute the nearest positions and normals
+            # time_start = time.time()
+            # nearest_positions, normals, rot_mats, face_vertices_select = mesh_sampler.compute_nearest_positions(contact_poss_geom, sample_body_name)
+            # print("Time taken to compute nearest positions:", time.time() - time_start)
 
             # Visualize the equivalent external forces
             equi_ext_fs = np.array(equi_ext_wrenchs)[:, :3]
@@ -134,18 +158,12 @@ def main() -> None:
                 if applied_predefined_wrench:
                     if applied_times < 10000:
                         wrench_applier.apply_predefined_wrench()
-                        applied_times += 1
                 else:
-                    res = applied_times // 100
-                    if res % 2 == 0:
-                        wrench_applier.apply_wrench(equi_ext_wrenchs[0], apply_body_names[0])
-                        applied_times += 1
-                    elif res % 2 == 1:
-                        wrench_applier.apply_wrench(-equi_ext_wrenchs[0], apply_body_names[0])
-                        applied_times += 1
+                    wrench_applier.apply_wrench(equi_ext_wrenchs[0], apply_body_names[0])
+                applied_times += 1
             
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
-            C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel) 
+            C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel)
             
             # Compute all dynamic matrixes with MuJoCo
             g, M = mujoco_dyn.compute_all_forces()
@@ -156,27 +174,10 @@ def main() -> None:
             # Update the generalized momentum observer
             gt_gm = M @ data.qvel
             est_ext_tau, est_gm = gm_estimator.update(data.qvel, M, C_pino, g, tau)
-            
-            # Print out the external forces on the end-effector.
-            ee_body_name = "attachment"
-            ee_body_id = model.body(ee_body_name).id
-            ext_wrench = data.xfrc_applied[ee_body_id]
-
-            # Compute the body jacobian for the end-effector.
-            jac_body = np.zeros((6, model.nv))
-            mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], ee_body_id)
-            jac_site = np.zeros((6, model.nv))
-            mujoco.mj_jacSite(model, data, jac_site[:3], jac_site[3:], model.site("attachment_site").id)
-            est_ext_wrench = np.linalg.pinv(jac_site.T) @ est_ext_tau
-            qp_est_ext_wrench, loss = solver.solve(jac_site[:3, :], est_ext_tau)
 
             # Append the estimated external forces and generalized momentum to the buffer.
-            est_ext_wrenches.append(est_ext_wrench.copy())
             est_gms.append(est_gm.copy())
-            gt_ext_wrenches.append(ext_wrench.copy())
             gt_gms.append(gt_gm.copy())
-            qp_est_ext_wrenches.append(qp_est_ext_wrench.copy())
-            jacs_site.append(jac_site.copy())
 
             # Set the control signal and step the simulation.
             np.clip(tau, *model.actuator_ctrlrange.T, out=tau)
@@ -194,11 +195,6 @@ def main() -> None:
             gt_ext_tau = tau_total - tau
             gt_ext_taus.append(gt_ext_tau.copy())
             est_ext_taus.append(est_ext_tau.copy())
-
-            # Compute the joint space external torques with the jacobian.
-            # Convert the external wrench to local world aligned coordinates.
-            computed_gt_ext_tau = jac_body.T @ ext_wrench
-            computed_gt_ext_taus.append(computed_gt_ext_tau.copy())
 
             viewer.sync()
             time_until_next_step = dt - (time.time() - step_start)
@@ -222,24 +218,11 @@ def main() -> None:
     # exit(0)
     
     import matplotlib.pyplot as plt
-    fig = plt.figure(figsize=(10, 5))
-    plot_param = 611
-    axs_name = ["fx", "fy", "fz", "mx", "my", "mz"]
-    t = np.arange(len(est_ext_wrenches)) * dt
-    for i in range(6):
-        ax = fig.add_subplot(plot_param)
-        ax.plot(t, est_ext_wrenches[:, i], label=f"Estimated External {axs_name[i]}")
-        ax.plot(t, gt_ext_wrenches[:, i], label=f"Ground Truth External {axs_name[i]}")
-        if i < 3:
-            ax.plot(t, qp_est_ext_wrenches[:, i], label=f"QP Estimated External {axs_name[i]}")
-        else:
-            ax.plot(t, np.zeros_like(gt_ext_wrenches[:, i]), label=f"QP Estimated External {axs_name[i]}")
-        ax.legend()
-        plot_param += 1
 
     fig = plt.figure(figsize=(10, 5))
     plot_param = 711
     axs_name = ["gm1", "gm2", "gm3", "gm4", "gm5", "gm6", "gm7"]
+    t = np.arange(len(est_gms)) * dt
     for i in range(7):
         ax = fig.add_subplot(plot_param)
         ax.plot(t, est_gms[:, i], label=f"Estimated Generalized Momentum {axs_name[i]}")
@@ -254,7 +237,7 @@ def main() -> None:
         ax = fig.add_subplot(plot_param)
         ax.plot(t, est_ext_taus[:, i], label=f"Estimated External Torque {axs_name[i]}")
         ax.plot(t, gt_ext_taus[:, i], label=f"Ground Truth External Torque {axs_name[i]}")
-        ax.plot(t, computed_gt_ext_taus[:, i], label=f"Computed External Torque {axs_name[i]}")
+        # ax.plot(t, computed_gt_ext_taus[:, i], label=f"Computed External Torque {axs_name[i]}")
         ax.legend()
         plot_param += 1
 

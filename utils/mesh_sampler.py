@@ -4,6 +4,7 @@ import numpy as np
 import trimesh
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.distance import cdist
 
 def get_geom_ids_using_mesh(model, mesh_name):
     # Get the mesh ID from the name
@@ -44,6 +45,15 @@ def compute_equivalent_wrench(wrench, com_point):
     equivalent_force = force
     equivalent_torque = torque + np.cross(com_point, force)
     return np.concatenate((equivalent_force, equivalent_torque))
+
+def batchwise_nearest(queries, references):
+    # queries: (B, D)
+    # references: (N, D)
+    # returns: indices of closest reference for each query
+    # dists = np.linalg.norm(queries[:, None, :] - references[None, :, :], axis=2)  # (B, N)
+    dists = cdist(queries, references, 'euclidean')  # (B, N)
+    nearest_indices = np.argmin(dists, axis=1)  # (B,)
+    return nearest_indices
 
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
@@ -115,17 +125,45 @@ class MeshSampler:
                 face_center_list.append(face_center)
                 rot_mat = compute_arrow_rotation(normal, face_center, A)
                 rot_mat_list.append(rot_mat)
-            data_dict_mesh_i["vis_face_list"] = vis_face_list
-            data_dict_mesh_i["normal_list"] = normal_list
-            data_dict_mesh_i["face_center_list"] = face_center_list
-            data_dict_mesh_i["rot_mat_list"] = rot_mat_list
+            data_dict_mesh_i["vis_face_list"] = np.array(vis_face_list)
+            data_dict_mesh_i["normal_list"] = np.array(normal_list)
+            data_dict_mesh_i["face_center_list"] = np.array(face_center_list)
+            data_dict_mesh_i["rot_mat_list"] = np.array(rot_mat_list)
             data_dict_mesh_i["geom_ids"] = geom_ids
-            data_dict_mesh_i["face_vertices_list"] = face_vertices_list
+            data_dict_mesh_i["face_vertices_list"] = np.array(face_vertices_list)
             data_dict_mesh_i["num_faces"] = f_count
             data_dict_mesh_i["num_vertices"] = v_count
             data_dict_mesh_i["geom_names"] = geom_names
             data_dict_mesh_i["geom_ids"] = geom_ids
             self.data_dict[mesh_name] = data_dict_mesh_i
+            
+        # Generate a mapping from body names to mesh and geom names
+        body_names = [self.model.body(i).name for i in range(self.model.nbody) if "link" in self.model.body(i).name]
+        body_names_mapping = {}
+        for body_name in body_names:
+            body_id = self.model.body(body_name).id
+            geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
+            if len(geom_ids) == 0:
+                raise ValueError(f"No geoms found for body '{body_name}'")
+            mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
+            mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
+            if len(mesh_names) == 0:
+                raise ValueError(f"No meshes found for body '{body_name}'")     
+            mesh_name = mesh_names[0]        
+            mesh_id = mesh_ids[0]
+            geom_id = geom_ids[0]    
+            
+            body_names_mapping[body_name] = {
+                "mesh_name": mesh_name,
+                "mesh_id": mesh_id,
+                "geom_id": geom_id,
+                "mesh_names": mesh_names,
+                "mesh_ids": mesh_ids,
+                "geom_names": self.data_dict[mesh_name]["geom_names"],
+                "geom_ids": self.data_dict[mesh_name]["geom_ids"]
+            }
+        self.data_dict["body_names_mapping"] = body_names_mapping
+
         xml_path = (Path(__file__).resolve().parent / ".." / f"{self.robot_name}/mesh_data").as_posix()
         file_name = f"{xml_path}/mesh_data_dict.npy"
         np.save(file_name, self.data_dict)
@@ -203,7 +241,6 @@ class MeshSampler:
             faces_center_local = [face_center_list[0]]
             arrows_rot_mat_local = [rot_mat_list[0]]
         
-            
         def reset_scene(scene):
             scene.ngeom = ngeom_init
             
@@ -260,11 +297,13 @@ class MeshSampler:
         rot_mat_list = mesh_data["rot_mat_list"]
         face_vertices_list = mesh_data["face_vertices_list"]
         
+        # TODO: could use a faster sampling method, right now is around 0.0002s
         idxs = np.random.choice(len(face_center_list), num_samples, replace=False)
-        face_center_select = np.array(face_center_list)[idxs]
-        normal_select = np.array(normal_list)[idxs]
-        rot_mat_select = np.array(rot_mat_list)[idxs]
-        face_vertices_select = np.array(face_vertices_list)[idxs]
+        # idxs = np.random.permutation(len(face_center_list))[:num_samples]
+        face_center_select = face_center_list[idxs]
+        normal_select = normal_list[idxs]
+        rot_mat_select = rot_mat_list[idxs]
+        face_vertices_select = face_vertices_list[idxs]
         return face_center_select, normal_select, rot_mat_select, face_vertices_select
 
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
@@ -278,17 +317,20 @@ class MeshSampler:
             pos: Sampled position (3D vector).
             normal: Sampled normal vector (3D vector).
         """
-        body_id = self.model.body(body_name).id
-        geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
-        if len(geom_ids) == 0:
-            raise ValueError(f"No geoms found for body '{body_name}'")
-        mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
-        mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
-        if len(mesh_names) == 0:
-            raise ValueError(f"No meshes found for body '{body_name}'")     
-        mesh_name = mesh_names[0]        
-        mesh_id = mesh_ids[0]
-        geom_id = geom_ids[0]
+        # body_id = self.model.body(body_name).id
+        # geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
+        # if len(geom_ids) == 0:
+        #     raise ValueError(f"No geoms found for body '{body_name}'")
+        # mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
+        # mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
+        # if len(mesh_names) == 0:
+        #     raise ValueError(f"No meshes found for body '{body_name}'")     
+        # mesh_name = mesh_names[0]        
+        # mesh_id = mesh_ids[0]
+        # geom_id = geom_ids[0]
+        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
+        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
+        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
         face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal(mesh_name, num_samples)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
         
@@ -340,11 +382,10 @@ class MeshSampler:
             rot_mats_contact_com.append(rot_mat_contact_com)
             
             # Update the site position and quaternion for computing jacobian
-            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{i+1}") # dummy site starts with 1
+            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site1") # TODO: change the hardcode case to fit the number of contact points
             model.site_pos[site_id] = contact_pos_com
             rot = R.from_matrix(rot_mat_contact_com)
-            quat = rot.as_quat(scalar_first=False)
-            quat_mujoco = np.concatenate((quat[3:], quat[:3]))
+            quat_mujoco = rot.as_quat(scalar_first=True)
             model.site_quat[site_id] = quat_mujoco
             jac_site_contact = np.zeros((6, model.nv))
             mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
@@ -359,6 +400,50 @@ class MeshSampler:
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
 
+    def retrieve_data_dict(self, body_name: str):
+        # body_id = self.model.body(body_name).id
+        # geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
+        # if len(geom_ids) == 0:
+        #     raise ValueError(f"No geoms found for body '{body_name}'")
+        # mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
+        # mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
+        # if len(mesh_names) == 0:
+        #     raise ValueError(f"No meshes found for body '{body_name}'")     
+        # mesh_name = mesh_names[0]  
+        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"] 
+        data_dict = self.data_dict[mesh_name]
+        return data_dict
+
+    def compute_nearest_position(self, position: np.ndarray, sample_body_name: str):
+        """
+            Compute the nearest position on the mesh to the given position.
+        """
+        data_dict = self.retrieve_data_dict(sample_body_name)
+        faces_center_local = data_dict["face_center_list"]
+        
+        # Compute the nearest position on the mesh to the given position
+        nearest_pos = None
+        min_dist = float("inf")
+        for i in range(len(faces_center_local)):
+            face_center = faces_center_local[i]
+            dist = np.linalg.norm(position - face_center)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_pos = face_center
+        rot_mat_select = data_dict["rot_mat_list"][i]
+        face_vertices_select = data_dict["face_vertices_list"][i]
+        normal_select = data_dict["normal_list"][i]
+        return nearest_pos, normal_select, rot_mat_select, face_vertices_select
+    
+    def compute_nearest_positions(self, positions: np.ndarray, sample_body_name: str):
+        data_dict = self.retrieve_data_dict(sample_body_name)
+        faces_center_local = data_dict["face_center_list"]
+        indices = batchwise_nearest(positions, faces_center_local)
+        nearest_positions = faces_center_local[indices]
+        normals = data_dict["normal_list"][indices]
+        rot_mats = data_dict["rot_mat_list"][indices]
+        faces_vertices_select = data_dict["face_vertices_list"][indices]
+        return nearest_positions, normals, rot_mats, faces_vertices_select
         
 if __name__ == "__main__":
     # Example usage
@@ -367,6 +452,6 @@ if __name__ == "__main__":
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
-    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
+    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link7", num_samples=5)
     print(faces_center_local)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
