@@ -211,6 +211,7 @@ if __name__ == "__main__":
     n_joints = 7
     n_contacts = 1
     mu = 0.5  # friction coefficient
+    n_qps = 100
     
     # Initialize the solver
     qp_solver = QPSolver(n_joints, n_contacts, mu)
@@ -218,7 +219,7 @@ if __name__ == "__main__":
     fcs = []
     Jcs = []
     objective_values = []
-    for i in range(100, 200):
+    for i in range(100, 100 + n_qps):
         index = i
         Jc = data_dict["jacs_body"][index]
         # Jc = data_dict["jacs_site"][index]
@@ -226,10 +227,8 @@ if __name__ == "__main__":
         ext_wrench = data_dict["gt_ext_wrenches"][index]
         gt_ext_tau = Jc.T @ ext_wrench
         gt_ext_taus.append(gt_ext_tau)
+        Jc = Jc[:3, :]  # Use only the first 3 rows of the Jacobian
         Jcs.append(Jc)
-        
-        # Solve the QP problem
-        Jc = Jc[:3, :]
 
         f_c, objective_value = qp_solver.solve(Jc, gt_ext_tau)
         objective_values.append(objective_value)
@@ -240,10 +239,9 @@ if __name__ == "__main__":
     # Example data
     n_joints = 7
     n_contacts = 1
-    n_qps = 100  # Number of QPs to solve simultaneously
     mu = 0.5
-    Jc_batch = np.array(data_dict["jacs_body"][100:100+n_qps][:, :3, :])
-    gt_ext_tau = np.array(gt_ext_taus[: 100])
+    Jc_batch = np.array(Jcs)
+    gt_ext_tau = np.array(gt_ext_taus)
     batch_qp_solver = BatchQPSolver(n_joints, n_contacts, n_qps, mu)
     
     for i in range(3):
@@ -254,8 +252,8 @@ if __name__ == "__main__":
         print(loss)
     
     # Example data    
-    Jc_batch = np.array(data_dict["jacs_body"][100:100+n_qps][:, :3, :])
-    gt_ext_tau = np.array(gt_ext_taus[: 100])
+    Jc_batch = np.array(Jcs)
+    gt_ext_tau = np.array(gt_ext_taus)
     from scipy.linalg import block_diag
     Jc_batch = block_diag(*Jc_batch)
     gt_ext_tau = gt_ext_tau.flatten()
