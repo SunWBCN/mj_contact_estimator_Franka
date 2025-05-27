@@ -3,14 +3,12 @@ import mujoco.viewer
 import numpy as np
 import time
 import pinocchio as pino
-from scipy.spatial.transform import Rotation as R
 from contact_estimator import high_gain_based_observer, kalman_disturbance_observer
 from utils.mujoco_dyn import mujocoDyn
 from external_wrench import WrenchApplier
 from controller import cartesian_impedance_nullspace
 from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
 from utils.mesh_sampler import MeshSampler
-from utils.qp_solver import QPSolver
 from utils.robot_transform import *
 from contact_particle_filter import ContactParticleFilter
 
@@ -77,6 +75,8 @@ def main() -> None:
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=100)
     print("Time taken to sample mesh point:", time.time() - start_time)
+    
+    # Fixed value for testing
     geom_id = 60
     contact_poss_geom = np.array([np.array([ 0.00244227, 0.03933891, -0.02926769])])
     normal_vecs_geom = np.array([np.array([-0.75993156, -0.47094217, 0.44801494])])
@@ -90,6 +90,12 @@ def main() -> None:
                                      )
                             ])
     ext_f_norm = 5.0
+    
+    # Compute the equivalent external forces to apply on the body.
+    equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
+    mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rots_mat_contact_geom, normal_vecs_geom, sample_body_name, 
+                                                geom_id, ext_f_norm)
+    
     applied_times = 0
     applied_ext_f = True
     applied_predefined_wrench = False
@@ -102,9 +108,6 @@ def main() -> None:
         # Set transparency for all geometries
         for i in range(model.ngeom):
             model.geom_rgba[i, 3] = 0.5  # Set alpha (transparency) to 50%
-
-    # Settings for the qp solver
-    solver = QPSolver(model.nv, 1, mu=0.5)
 
     with mujoco.viewer.launch_passive(
         model=model,
@@ -122,6 +125,9 @@ def main() -> None:
         # Reset the free camera.
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
 
+        # 
+        mujoco.mj_forward(model, data)
+
         # Enable site frame visualization.
         viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
         while viewer.is_running():
@@ -131,18 +137,9 @@ def main() -> None:
             reset_scene(scene, ngeom_init)
                 
             # Retrieve the geometry position and rotation matrix.
-            mujoco.mj_forward(model, data)
             geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
             rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
             visualize_mat_arrows(scene, geom_pos_world, rot_mat_geom_world, contact_poss_geom, rots_mat_contact_geom, arrow_length=arrow_length)
-
-            # # Compute the equivalent external wrenches to acts on the body.
-            # import time
-            # time_start = time.time()
-            equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
-            mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rots_mat_contact_geom, normal_vecs_geom, sample_body_name, 
-                                                     geom_id, ext_f_norm)
-            # print("Time taken to compute equivalent wrenches:", time.time() - time_start)
 
             # # Compute the nearest positions and normals
             # time_start = time.time()
@@ -165,13 +162,13 @@ def main() -> None:
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
             C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel)
             
-            # Compute all dynamic matrixes with MuJoCo
+            # Compute all dynamic matrixes with MuJoCo.
             g, M = mujoco_dyn.compute_all_forces()
             
             # Compute the control law.
             tau = cartesian_impedance_nullspace(model, data, dt)
             
-            # Update the generalized momentum observer
+            # Update the generalized momentum observer.
             gt_gm = M @ data.qvel
             est_ext_tau, est_gm = gm_estimator.update(data.qvel, M, C_pino, g, tau)
 
@@ -185,7 +182,7 @@ def main() -> None:
             mujoco.mj_step(model, data)
             
             # Compute the inverse dynamics torques.
-            mujoco.mj_forward(model, data)
+            # mujoco.mj_forward(model, data)
             mujoco.mj_inverse(model, data)
 
             # The total joint torques (including gravity, Coriolis, and external forces)
