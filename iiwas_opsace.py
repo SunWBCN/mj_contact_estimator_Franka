@@ -48,7 +48,6 @@ def main() -> None:
 
     # Initialize the contact estimator
     gm_estimator = high_gain_based_observer(dt, "hg", model.nv)
-    # gm_estimator = kalman_disturbance_observer(dt, model.nv)
 
     # Initialize a buffer for visualization of the estimated external forces and generalized momentum.
     est_ext_wrenches = []
@@ -96,9 +95,6 @@ def main() -> None:
     applied_times = 0
     applied_ext_f = False
     applied_predefined_wrench = False
-    
-    # Change the renderer
-    renderer = mujoco.Renderer(model)
 
     # Settings for visualization
     arrow_length = 0.1 * ext_f_norm
@@ -197,11 +193,6 @@ def main() -> None:
             
             # Compute the joint space external torques
             gt_ext_tau = tau_total - tau
-            # print("Ground Truth External Torque:", gt_ext_tau)
-            # print("Estimated External Torque with Equi:", jac_body.T @ equi_ext_wrenches[0])
-            # print("Estimated External Torque with Contact:", jacs_contact[-1].T @ ext_wrenches[0])
-            # print("Estimated External Torque with Observer:", est_ext_tau)
-            # print("===============================================")
             gt_ext_taus.append(gt_ext_tau.copy())
             est_ext_taus.append(est_ext_tau.copy())
 
@@ -221,16 +212,7 @@ def main() -> None:
     computed_gt_ext_taus = np.array(computed_gt_ext_taus)
     gt_ext_wrenches = np.array(gt_ext_wrenches)
     
-    # # Save the data to a file
-    # data_dict = {"gt_ext_wrenches": gt_ext_wrenches, "gt_ext_taus": gt_ext_taus, 
-    #              "jacs_site": jacs_site, "jacs_site": jacs_site, "jacs_body": jacs_body,
-    #              "jacs_contact": jacs_contact, "gt_ext_wrenches": gt_ext_wrenches,
-    #              "gt_equi_ext_wrenches": gt_equi_ext_wrenches,}
-    # np.savez("data.npz", **data_dict)
-    # exit(0)
-    
     import matplotlib.pyplot as plt
-
     fig = plt.figure(figsize=(10, 5))
     plot_param = 711
     axs_name = ["gm1", "gm2", "gm3", "gm4", "gm5", "gm6", "gm7"]
