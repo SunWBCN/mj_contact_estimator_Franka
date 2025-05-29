@@ -1,7 +1,7 @@
 from jaxopt import OSQP
 import jax
 import jax.numpy as jnp
-jax.config.update("jax_enable_x64", True)
+# jax.config.update("jax_enable_x64", True)
 
 # Generate the QP problem with a pyramid constraint to approximate the friction cone
 # The QP is a least square problem with a linear inequality constraint

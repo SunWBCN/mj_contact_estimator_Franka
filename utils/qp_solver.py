@@ -221,17 +221,20 @@ if __name__ == "__main__":
     objective_values = []
     for i in range(100, 100 + n_qps):
         index = i
-        Jc = data_dict["jacs_body"][index]
-        # Jc = data_dict["jacs_site"][index]
+        Jc = data_dict["jacs_contact"][index]
         ext_tau = data_dict["gt_ext_taus"][index]
         ext_wrench = data_dict["gt_ext_wrenches"][index]
         gt_ext_tau = Jc.T @ ext_wrench
         gt_ext_taus.append(gt_ext_tau)
-        Jc = Jc[:3, :]  # Use only the first 3 rows of the Jacobian
+        
+        # Solve the QP problem
+        Jc = Jc[:3, :]
         Jcs.append(Jc)
 
         f_c, objective_value = qp_solver.solve(Jc, gt_ext_tau)
         objective_values.append(objective_value)
+    print("Contact forces:", f_c)
+    print("Ground Truth External force:", ext_wrench)
     print(np.mean(objective_values))
     end_time = time.time()
     print("Time taken to solve QP:", end_time - start_time)
@@ -250,6 +253,7 @@ if __name__ == "__main__":
         end_time = time.time()
         print("Batch QP solver time:", end_time - start_time)
         print(loss)
+    print(f_c_batch)
     
     # Example data    
     Jc_batch = np.array(Jcs)
@@ -265,4 +269,5 @@ if __name__ == "__main__":
         f_c_batch, loss = batch_qp_solver2.solve(Jc_batch, gt_ext_tau)
         end_time = time.time()
         print("Batch QP solver2 time:", end_time - start_time)
-        print(loss)
+        # print(f_c_batch)
+    # print(f_c_batch)

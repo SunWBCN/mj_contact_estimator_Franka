@@ -5,6 +5,8 @@ import trimesh
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
+import jax
+from jax import numpy as jnp
 
 def get_geom_ids_using_mesh(model, mesh_name):
     # Get the mesh ID from the name
@@ -54,6 +56,20 @@ def batchwise_nearest(queries, references):
     dists = cdist(queries, references, 'euclidean')  # (B, N)
     nearest_indices = np.argmin(dists, axis=1)  # (B,)
     return nearest_indices
+
+@jax.jit
+def batchwise_nearest_jax(queries, references):
+    # queries: (B, D)
+    # references: (N, D)
+    # returns: indices of closest reference for each query
+    dists = jnp.linalg.norm(queries[:, None, :] - references[None, :, :], axis=2)  # (B, N)
+    # dists = jax.scipy.spatial.distance.cdist(queries, references, 'euclidean')  # (B, N)
+    nearest_indices = jnp.argmin(dists, axis=1)  # (B,)
+    return nearest_indices
+
+@jax.jit
+def slice_with_indices(array, indices):
+    return jax.vmap(lambda i: array[i])(indices)
 
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
@@ -135,6 +151,11 @@ class MeshSampler:
             data_dict_mesh_i["num_vertices"] = v_count
             data_dict_mesh_i["geom_names"] = geom_names
             data_dict_mesh_i["geom_ids"] = geom_ids
+            data_dict_mesh_i["vis_face_list_jax"] = jnp.array(vis_face_list)
+            data_dict_mesh_i["normal_list_jax"] = jnp.array(normal_list)
+            data_dict_mesh_i["face_center_list_jax"] = jnp.array(face_center_list)
+            data_dict_mesh_i["rot_mat_list_jax"] = jnp.array(rot_mat_list)
+            data_dict_mesh_i["face_vertices_list_jax"] = jnp.array(face_vertices_list)
             self.data_dict[mesh_name] = data_dict_mesh_i
             
         # Generate a mapping from body names to mesh and geom names
@@ -306,6 +327,51 @@ class MeshSampler:
         face_vertices_select = face_vertices_list[idxs]
         return face_center_select, normal_select, rot_mat_select, face_vertices_select
 
+    def sample_pos_normal_jax(self, mesh_name: str, num_samples: int = 3):
+        """
+        Sample a position and normal vector from the mesh using JAX.
+        
+        Args:
+            mesh_name: Name of the mesh to sample from.
+        
+        Returns:
+            pos: Sampled position (3D vector).
+            normal: Sampled normal vector (3D vector).
+        """
+        mesh_data = self.data_dict[mesh_name]
+        face_center_list = mesh_data["face_center_list_jax"]
+        normal_list = mesh_data["normal_list_jax"]
+        rot_mat_list = mesh_data["rot_mat_list_jax"]
+        face_vertices_list = mesh_data["face_vertices_list"]
+
+        # Sample indices
+        idxs = jax.random.choice(jax.random.PRNGKey(0), len(face_center_list), shape=(num_samples,), replace=False)
+        
+        # Select sampled data
+        face_center_select = face_center_list[idxs]
+        normal_select = normal_list[idxs]
+        rot_mat_select = rot_mat_list[idxs]
+        face_vertices_select = face_vertices_list[idxs]
+        
+        return face_center_select, normal_select, rot_mat_select, face_vertices_select
+    
+    def sample_body_pos_normal_jax(self, body_name: str, num_samples: int = 3):
+        """
+        Sample a position and normal vector from the body using JAX.
+        
+        Args:
+            body_name: Name of the body to sample from.
+        
+        Returns:
+            pos: Sampled position (3D vector).
+            normal: Sampled normal vector (3D vector).
+        """
+        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
+        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
+        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
+        face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal_jax(mesh_name, num_samples)
+        return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
+
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
         """
         Sample a position and normal vector from the body.
@@ -337,7 +403,6 @@ class MeshSampler:
     def compute_equivalent_wrenches(self, contact_poss_geom: list, rots_mat_contact_geom: list, normal_vecs_geom: list, sample_body_name: str, geom_id: int, ext_f_norm: float):
         model = self.model
         data = self.data
-        mujoco.mj_forward(model, data)
         geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
         rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)    
         com_pos_world = data.xpos[model.body(sample_body_name).id]
@@ -387,16 +452,24 @@ class MeshSampler:
             rot = R.from_matrix(rot_mat_contact_com)
             quat_mujoco = rot.as_quat(scalar_first=True)
             model.site_quat[site_id] = quat_mujoco
+            mujoco.mj_forward(model, data) # update kinematics
             jac_site_contact = np.zeros((6, model.nv))
             mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
             jacobian_contacts.append(jac_site_contact)
             
+            # # Compute the finite difference jacobian of the site for comparison
+            # # Note: this is not the same as the jacobian of the contact point, but it is a good approximation
+            # # Perturb the joint positions
+            # original_qpos = data.qpos.copy()
+            # original_site_pos = model.site_pos[site_id].copy()
+            # original_site_quat = model.site_quat[site_id].copy()
+                
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
             jacobian_bodies.append(jac_body)
             
             # print(jac_site_contact.T @ ext_wrench - jac_body.T @ equi_ext_wrench) # Check the euqivalent wrench is correct or not
-            # print("========================")
+            # print(f"Iter {i}: ========================")
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
 
@@ -444,6 +517,25 @@ class MeshSampler:
         rot_mats = data_dict["rot_mat_list"][indices]
         faces_vertices_select = data_dict["face_vertices_list"][indices]
         return nearest_positions, normals, rot_mats, faces_vertices_select
+    
+    def compute_nearest_positions_jax(self, positions: jnp.ndarray, sample_body_name: str):
+        import time
+        # start = time.time()
+        data_dict = self.retrieve_data_dict(sample_body_name)
+        # print("Data dict retrieval time:", time.time() - start)
+        faces_center_local = data_dict["face_center_list_jax"]
+        # start = time.time()
+        indices = batchwise_nearest_jax(positions, faces_center_local)
+        # print("Batchwise nearest time:", time.time() - start)
+        # nearest_positions = faces_center_local[indices]
+        # normals = data_dict["normal_list_jax"][indices]
+        # rot_mats = data_dict["rot_mat_list_jax"][indices]
+        # faces_vertices_select = data_dict["face_vertices_list_jax"][indices]
+        nearest_positions = slice_with_indices(faces_center_local, indices)
+        normals = slice_with_indices(data_dict["normal_list_jax"], indices)
+        rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
+        faces_vertices_select = slice_with_indices(data_dict["face_vertices_list_jax"], indices)
+        return nearest_positions, normals, rot_mats, faces_vertices_select
         
 if __name__ == "__main__":
     # Example usage
@@ -451,7 +543,7 @@ if __name__ == "__main__":
     xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/scene.xml").as_posix()
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
-    mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
+    mesh_sampler = MeshSampler(model, data, init_mesh_data=True)
     mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link7", num_samples=5)
     print(faces_center_local)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
