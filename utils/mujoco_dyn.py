@@ -65,7 +65,16 @@ class mujocoDyn:
         self.data = data
         self.nv = model.nv
 
-    def compute_all_forces(self):
+    def update_data(self, data: mujoco.MjData):
+        """
+        Update the MuJoCo data object.
+        
+        Args:
+            data: mujoco.MjData
+        """
+        self.data = data
+
+    def compute_all_forces(self, model=None, data=None):
         # TODO: Implement the function to compute the coriolis matrix
         """
         Compute all forces including gravity and Coriolis forces.
@@ -75,7 +84,10 @@ class mujocoDyn:
             M: Joint space inertia matrix of shape (nv, nv)
             C: Coriolis matrix of shape (nv, nv)
         """
-        
-        g = compute_gravity_forces(self.model, self.data)
-        M = compute_joint_space_inertia_matrix(self.model, self.data)
+        if model is None:
+            model = self.model
+        if data is None:
+            data = self.data
+        g = compute_gravity_forces(model, data)
+        M = compute_joint_space_inertia_matrix(model, data)
         return g, M

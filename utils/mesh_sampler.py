@@ -383,17 +383,6 @@ class MeshSampler:
             pos: Sampled position (3D vector).
             normal: Sampled normal vector (3D vector).
         """
-        # body_id = self.model.body(body_name).id
-        # geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
-        # if len(geom_ids) == 0:
-        #     raise ValueError(f"No geoms found for body '{body_name}'")
-        # mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
-        # mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
-        # if len(mesh_names) == 0:
-        #     raise ValueError(f"No meshes found for body '{body_name}'")     
-        # mesh_name = mesh_names[0]        
-        # mesh_id = mesh_ids[0]
-        # geom_id = geom_ids[0]
         mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
         mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
         geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
@@ -455,19 +444,10 @@ class MeshSampler:
             mujoco.mj_forward(model, data) # update kinematics
             jac_site_contact = np.zeros((6, model.nv))
             mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
-            jacobian_contacts.append(jac_site_contact)
-            
-            # # Compute the finite difference jacobian of the site for comparison
-            # # Note: this is not the same as the jacobian of the contact point, but it is a good approximation
-            # # Perturb the joint positions
-            # original_qpos = data.qpos.copy()
-            # original_site_pos = model.site_pos[site_id].copy()
-            # original_site_quat = model.site_quat[site_id].copy()
-                
+            jacobian_contacts.append(jac_site_contact)    
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
             jacobian_bodies.append(jac_body)
-            
             # print(jac_site_contact.T @ ext_wrench - jac_body.T @ equi_ext_wrench) # Check the euqivalent wrench is correct or not
             # print(f"Iter {i}: ========================")
             

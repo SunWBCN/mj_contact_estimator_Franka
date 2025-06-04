@@ -39,7 +39,6 @@ def main() -> None:
         "joint6",
         "joint7",
     ]
-    # dof_ids = np.array([model.joint(name).id for name in joint_names])
     actuator_ids = np.array([model.actuator(name).id for name in joint_names])
 
     # Initial joint configuration saved as a keyframe in the XML file.
@@ -71,11 +70,8 @@ def main() -> None:
     # Set up the mesh sampler, sample a mesh point.
     sample_body_name = "link7"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
-    import time
-    start_time = time.time()
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=1)
-    print("Time taken to sample mesh point:", time.time() - start_time)
     
     # Fixed value for testing
     geom_id = 60
