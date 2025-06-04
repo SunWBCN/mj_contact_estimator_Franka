@@ -93,7 +93,7 @@ def main() -> None:
     ext_f_norm = 5.0
     
     applied_times = 0
-    applied_ext_f = False
+    applied_ext_f = True
     applied_predefined_wrench = False
 
     # Settings for visualization
@@ -159,7 +159,7 @@ def main() -> None:
                     if applied_times < 10000:
                         wrench_applier.apply_predefined_wrench()
                 else:
-                    wrench_applier.apply_wrench(equi_ext_wrenches[0], apply_body_names[0])
+                    wrench_applier.apply_wrench(equi_ext_wrenches[0], sample_body_name)
                 applied_times += 1
             
             # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
