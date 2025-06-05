@@ -7,7 +7,7 @@ from contact_estimator import high_gain_based_observer, kalman_disturbance_obser
 from utils.mujoco_dyn import mujocoDyn
 from external_wrench import WrenchApplier
 from controller import cartesian_impedance_nullspace
-from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
+from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows, visualize_particles
 from utils.mesh_sampler import MeshSampler
 
 # Simulation timestep in seconds.

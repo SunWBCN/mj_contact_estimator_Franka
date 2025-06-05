@@ -71,3 +71,29 @@ def visualize_mat_arrows(scene, geom_origin_pos_world: np.ndarray, geom_origin_m
         face_center_local = faces_center_local[i]
         arrow_rot_mat_local = arrows_rot_mat_local[i]
         update_scene(scene, geom_origin_pos_world, geom_origin_mat_world, face_center_local, arrow_rot_mat_local)
+        
+def visualize_particles(scene, geom_origin_pos_world: np.ndarray, geom_origin_mat_world: np.ndarray, particles_pos_geom: np.ndarray, particles_mat_geom: np.ndarray, rgba: np.ndarray = np.array([1.0, 0.0, 0.0, 1.0]), radius: float = 0.01):
+    """
+    Visualize particles in the MuJoCo scene.
+    
+    Args:
+        scene: MuJoCo scene object
+        particles_pos_world: Array of particle positions in world coordinates (N, 3)
+        rgba: Color of the particles (R, G, B, A)
+        radius: Radius of the particles
+    """
+    def update_scene(scene, sphere_pos_world, sphere_rot_mat_world, rgba, radius):
+        scene.ngeom += 1  # increment ngeom
+        size_array = np.array([radius, radius, radius], dtype=np.float32)
+        mujoco.mjv_initGeom(
+            scene.geoms[scene.ngeom - 1],
+            mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=size_array,
+            pos=sphere_pos_world,
+            mat=sphere_rot_mat_world.flatten(),
+            rgba=rgba.astype(np.float32),
+        )
+    for pos_geom, rot_mat_geom in zip(particles_pos_geom, particles_mat_geom):
+        sphere_mat_world = geom_origin_mat_world @ rot_mat_geom
+        sphere_pos_world = geom_origin_pos_world + geom_origin_mat_world @ pos_geom
+        update_scene(scene, sphere_pos_world, sphere_mat_world, rgba, radius)
