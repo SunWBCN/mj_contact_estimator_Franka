@@ -9,6 +9,7 @@ from controller import *
 from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize_mat_arrows
 from utils.mesh_sampler import MeshSampler
 from utils.robot_transform import *
+from utils.qp_solver import BatchQPSolver, QPSolver
 from contact_particle_filter import ContactParticleFilter, cpf_step, visualize_particles
 from mujoco import mjx
 import jax
@@ -43,7 +44,6 @@ def main() -> None:
 
     # Update model and data.
     mujoco.mj_forward(model, data)
-
     
     # Load the model and data with Pinocchio
     pino_model = pino.buildModelFromMJCF("kuka_iiwa_14/iiwa14.xml")
@@ -88,30 +88,18 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    sample_body_name = "link7"
+    sample_body_name = "link5"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     import time
     start_time = time.time()
+    randomseed = np.random.randint(0, 10000)
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
-    mesh_sampler.sample_body_pos_normal_jax(sample_body_name, num_samples=1)
+    mesh_sampler.sample_body_pos_normal_jax(sample_body_name, num_samples=1, key=jax.random.PRNGKey(randomseed))
     print("Time taken to sample mesh point:", time.time() - start_time)
     
     # Fixed value for testing
-    geom_id = 60
-    contact_poss_geom = jnp.array([jnp.array([ 0.00244227, 0.03933891, -0.02926769])])
-    normal_vecs_geom = jnp.array([jnp.array([-0.75993156, -0.47094217, 0.44801494])])
-    rot_mats_contact_geom = jnp.array([
-                                jnp.array(
-                                            [
-                                            [-0.59587467, -0.25967506, -0.7599316],
-                                            [0.78010535, -0.41187733, -0.4709422],
-                                            [-0.19070667, -0.8734563, 0.44801497]
-                                            ]
-                                        )
-                            ])
     contact_pos_target = contact_poss_geom[0]
     ext_f_norm = 5.0
-    
     applied_times = 0
     applied_ext_f = True
     applied_predefined_wrench = False
@@ -129,9 +117,14 @@ def main() -> None:
     mujoco.mjv_defaultFreeCamera(model, viewer.cam)
     scene = viewer.scn
     ngeom_init = scene.ngeom
-            
+    
     # Enable site frame visualization.
     viewer.vopt.frame = mujoco.mjtFrame.mjFRAME_SITE
+    site_names = [f"{sample_body_name}_dummy_site{i}" for i in range(1, 2)]
+    for site_name in site_names:
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+        if site_id > -1:
+            model.site_size[site_id] * 0.2
     
     # Initialize the JAX model and data for mjx.
     mjx_model = mjx.put_model(model)
@@ -142,10 +135,9 @@ def main() -> None:
     if use_mjx:
         mjx_data = warmup_jit(mjx_model, mjx_data, model, data, sample_body_name=sample_body_name)
         data = mjx.get_data(model, mjx_data)
-        cpf = ContactParticleFilter(model=model, data=data, n_particles=30, robot_name="kuka_iiwa_14", sample_body_name=sample_body_name, ext_f_norm=5.0,
-                                importance_distribution_noise=0.006, measurement_noise=0.006)
+        cpf = ContactParticleFilter(model=model, data=data, n_particles=50, robot_name="kuka_iiwa_14", sample_body_name=sample_body_name, ext_f_norm=5.0,
+                                importance_distribution_noise=0.02, measurement_noise=0.02)
         cpf.initialize_particles()
-        iters = 20
         site_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{i}") for i in range(cpf.n_particles)]
         site_ids = jnp.array(site_ids)  # shape (n_particles, )
         site_ids = jax.device_put(site_ids, device=jax.devices()[0])
@@ -155,6 +147,10 @@ def main() -> None:
         particle_history = []
         average_errors = []
         gt_ext_tau = jnp.zeros(model.nv)
+        update_gt_ext_tau = False
+        mu = 200.0
+        qp_solver = QPSolver(n_joints=model.nv, n_contacts=1, mu=mu)
+        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=1, n_qps=cpf.n_particles, mu=mu)
     
     carry = {"carry_particles": {}, "carry_mat_arrows": {}, "carry_normal_arrows": {}}
     
@@ -167,13 +163,17 @@ def main() -> None:
         # Retrieve the geometry position and rotation matrix.
         geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
         rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
+        com_pos_world = data.xpos[model.body(sample_body_name).id]
+        rot_mat_com_world = data.xmat[model.body(sample_body_name).id].reshape(3, 3)
+        
         carry["carry_mat_arrows"]["geom_origin_pos_world"] = geom_pos_world
         carry["carry_mat_arrows"]["geom_origin_mat_world"] = rot_mat_geom_world
         carry["carry_mat_arrows"]["arrows_pos_local"] = contact_poss_geom
         carry["carry_mat_arrows"]["arrows_rot_mat_local"] = rot_mats_contact_geom
-
+        
         # Compute the equivalent external forces to apply on the body.
         ## Add a function that computes the equivalent external forces with jax.numpy
+        mesh_sampler.update_model_data(model, data)
         equi_ext_f_poss, equi_ext_wrenches, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
         mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rot_mats_contact_geom, normal_vecs_geom, sample_body_name, 
                                                     geom_id, ext_f_norm)
@@ -230,11 +230,18 @@ def main() -> None:
             # jit functions
             tau = jnp.clip(tau, *model.actuator_ctrlrange.T)
             mjx_data = update_ctrl_mjx(mjx_data, tau)
+            jax.block_until_ready(mjx_data)
             mjx_data = jit_step(mjx_model, mjx_data)
+            jax.block_until_ready(mjx_data)
             mjx_data = jit_forward(mjx_model, mjx_data)
+            jax.block_until_ready(mjx_data)
             data = mjx.get_data(model, mjx_data)
+            jax.block_until_ready(data)
             mujoco.mj_forward(model, data)
-            cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, site_ids=site_ids, particle_history=particle_history, average_errors=average_errors)            
+            data_log = {"contact_pos_target": contact_pos_target, "jacobian_contact": jacobian_contacts[0], "ext_wrenches": ext_wrenches[0]}
+            if update_gt_ext_tau:
+                cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, site_ids=site_ids, particle_history=particle_history, average_errors=average_errors, iters=10,
+                        data_log=data_log, batch_qp_solver=batch_qp_solver)            
             carry["carry_particles"]["geom_origin_pos_world"] = geom_pos_world
             carry["carry_particles"]["geom_origin_mat_world"] = rot_mat_geom_world
             carry["carry_particles"]["particles_pos_geom"] = cpf.particles
@@ -246,11 +253,14 @@ def main() -> None:
 
         # The total joint torques (including gravity, Coriolis, and external forces)
         # tau_total = data.qfrc_inverse.copy()
-        mjx_data = jit_inverse(mjx_model, mjx_data) if use_mjx else mujoco.mj_inverse(model, data)
-        tau_total = mjx_data.qfrc_inverse.copy() if use_mjx else data.qfrc_inverse.copy()
+        # mjx_data = jit_inverse(mjx_model, mjx_data) if use_mjx else mujoco.mj_inverse(model, data)
+        # tau_total = mjx_data.qfrc_inverse.copy() if use_mjx else data.qfrc_inverse.copy()
         
         # Compute the joint space external torques
-        gt_ext_tau = tau_total - tau
+        # gt_ext_tau = tau_total - tau
+        gt_ext_tau = jnp.dot(jacobian_contacts[0].T, ext_wrenches[0])
+        if not update_gt_ext_tau:
+            update_gt_ext_tau = True
         gt_ext_taus.append(gt_ext_tau.copy())
         est_ext_taus.append(est_ext_tau.copy())
 

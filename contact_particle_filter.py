@@ -39,14 +39,17 @@ class ContactParticleFilter:
         self.sample_body_id = model.body(sample_body_name).id
     
     def initialize_particles(self):
+        randomseed = np.random.randint(0, 1000000)
+        key = jax.random.PRNGKey(randomseed)
         mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
-        self.sampler.sample_body_pos_normal_jax(self.sample_body_name, num_samples=self.n_particles)
+        self.sampler.sample_body_pos_normal_jax(self.sample_body_name, num_samples=self.n_particles, key=key)
         self.particles = contact_poss_geom
         self.forces_normal = normal_vecs_geom * self.ext_f_norm
         self.rots_mat_contact = rots_mat_contact_geom
         self.face_vertices_select = face_vertices_select
         self.geom_id = geom_id
         self.weight = jnp.ones(self.n_particles) / self.n_particles
+        self.particle_center = jnp.mean(self.particles, axis=0)
         return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_id
         
     def predict_particles(self, key):
@@ -75,11 +78,13 @@ class ContactParticleFilter:
             self.rots_mat_contact = slice_with_indices(self.rots_mat_contact, indices)
             self.face_vertices_select = slice_with_indices(self.face_vertices_select, indices)
             self.weight = jnp.ones(self.n_particles) / self.n_particles
+            self.particle_center = jnp.mean(self.particles, axis=0)
         else:
             raise ValueError("Unknown resampling method: {}".format(method))
         return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_id
 
-def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, iters=20, particle_history=[], average_errors=[]):
+def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, batch_qp_solver, iters=20, particle_history=[], 
+             average_errors=[], data_log=None, qp_loss=True, qp_solver=None):
     geom_pos_world, rot_mat_geom_world, com_pos_world, rot_mat_com_world = get_contact_pos_rot(mjx_data, cpf.geom_id,
                                                                                                cpf.sample_body_id)
     qpos = mjx_data.qpos
@@ -90,7 +95,25 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, iters=20, part
         compute_batch_site_jac_pipeline(rot_mats_contact_geom, particles, rot_mat_geom_world,
                                         rot_mat_com_world, geom_pos_world, com_pos_world, 
                                         mjx_model, mjx_data, qpos, site_ids)
-        params, errors = solve_batch_qp(jacobians, gt_ext_tau)
+        
+        # wait till the jacobian is computed
+        jax.block_until_ready(jacobians)
+        if not qp_loss:
+            contact_pos_target = data_log["contact_pos_target"]
+            measurement_noise = cpf.measurement_noise
+            contact_pos_target_measurement = contact_pos_target + jax.random.normal(key=key, shape=contact_pos_target.shape) * measurement_noise
+            errors = jnp.linalg.norm(particles - contact_pos_target_measurement, axis=1)
+        else:
+            # params, errors = solve_batch_qp(jacobians, gt_ext_tau)
+            if qp_solver is not None:
+                params, errors = [], []
+                for i in range(len(jacobians)):
+                    param, error = qp_solver.solve(np.array(jacobians[i]), np.array(gt_ext_tau))
+                    params.append(param)
+                    errors.append(error)
+                errors = jnp.array(errors).flatten()
+            else:
+                params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau))
         cpf.update_weights(errors)
         key, subkey = jax.random.split(key)
         particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_id = cpf.resample_particles(subkey, method='multinomial')
@@ -101,12 +124,14 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
     # Create animation
     particle_axes = axes[0]  # Top row for particle evolution
     error_ax = axes[1, 1]    # Bottom center for error evolution
+    particle_center_ax = axes[1, 0] # Bottom left for error of particle center
 
-    x_limit = 0.06
-    y_limit = 0.06
+    x_limit = 0.2
+    y_limit = 0.2
 
     def update(frame):
         particles = particle_history[frame]
+        particle_center = jnp.mean(particles, axis=0)
         for ax in particle_axes:
             ax.clear()
 
@@ -144,6 +169,16 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
         error_ax.set_xlabel("Iteration")
         error_ax.set_ylabel("Average Error")
         error_ax.grid(True)
+        
+        # Update the error plot for particle center
+        particle_center_ax.clear()
+        particle_center_error = jnp.linalg.norm(particle_center - contact_pos_target)
+        particle_center_ax.plot(range(1, frame + 2), [particle_center_error] * (frame + 1), marker='o', linestyle='-', color='green')
+        particle_center_ax.set_title("Error of Particle Center")
+        particle_center_ax.set_xlabel("Iteration")
+        particle_center_ax.set_ylabel("Error")
+        particle_center_ax.set_ylim(0, 0.1)
+        particle_center_ax.grid(True)
 
     fps = 60
     interval = 1000 / fps  # milliseconds

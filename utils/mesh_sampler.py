@@ -7,6 +7,7 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
 import jax
 from jax import numpy as jnp
+jax.config.update("jax_enable_x64", True)
 
 def get_geom_ids_using_mesh(model, mesh_name):
     # Get the mesh ID from the name
@@ -71,6 +72,10 @@ def batchwise_nearest_jax(queries, references):
 def slice_with_indices(array, indices):
     return jax.vmap(lambda i: array[i])(indices)
 
+feasible_region_idxes = {"link_7": [[988, -1]], "link_6_orange": [[0, -1]], "link_5": [[800, 1800], [2000, -1]],
+                         "link_4_orange": [[0, -1]], "link_3": [[675, 5979], [6236, -1]], "link_2_orange": [[0, -1]],
+                         "link_1": [[400, 1000], [1000, 8120], [8451, -1]]}
+
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
         self.model = model
@@ -117,6 +122,22 @@ class MeshSampler:
             mesh_name = self.model.mesh(i).name
             geom_ids = get_geom_ids_using_mesh(self.model, mesh_name)
             geom_names = [self.model.geom(i).name for i in geom_ids]
+            
+            # preprocessing the valid meshes
+            print(mesh_name)
+            if mesh_name in feasible_region_idxes.keys():
+                faces_ = []
+                print("================", mesh_name, "================")
+                for idxes in feasible_region_idxes[mesh_name]:
+                    start_idx = idxes[0]
+                    end_idx = idxes[1]
+                    if end_idx == -1:
+                        faces_.extend(faces[start_idx:])
+                    else:
+                        faces_.extend(faces[start_idx:end_idx])
+                print(f"Number of faces: {len(faces_)}")
+                print(f"Number of faces before: {len(faces)}")
+                faces = np.array(faces_)
         
             # skip the meshes that are not able to acts as a contact surface
             if mesh_name == "band" or mesh_name == "kuka":
@@ -190,7 +211,7 @@ class MeshSampler:
         np.save(file_name, self.data_dict)
         print(f"Mesh data saved to {file_name}")
             
-    def visualize_mesh(self, mesh_id: int, num_faces_to_show: int = 10):
+    def visualize_mesh(self, mesh_id: int, faces_start: int = 10, faces_end: int = -1):
         v_start = self.model.mesh_vertadr[mesh_id]
         v_count = self.model.mesh_vertnum[mesh_id]
         vertices = self.model.mesh_vert[v_start : v_start+v_count].reshape(-1, 3)
@@ -199,8 +220,9 @@ class MeshSampler:
         f_count = self.model.mesh_facenum[mesh_id]
         faces = self.model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        faces = faces[faces_start:faces_end] if faces_end != -1 else faces[faces_start:]
 
-        for face_i in range(num_faces_to_show):
+        for face_i in range(len(faces)):
             face = faces[face_i]
             face_vertices = vertices[face]
             face_mesh = trimesh.Trimesh(vertices=face_vertices, faces=[[0, 1, 2]], process=False)
@@ -327,7 +349,7 @@ class MeshSampler:
         face_vertices_select = face_vertices_list[idxs]
         return face_center_select, normal_select, rot_mat_select, face_vertices_select
 
-    def sample_pos_normal_jax(self, mesh_name: str, num_samples: int = 3):
+    def sample_pos_normal_jax(self, mesh_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
         Sample a position and normal vector from the mesh using JAX.
         
@@ -345,7 +367,7 @@ class MeshSampler:
         face_vertices_list = mesh_data["face_vertices_list"]
 
         # Sample indices
-        idxs = jax.random.choice(jax.random.PRNGKey(0), len(face_center_list), shape=(num_samples,), replace=False)
+        idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
         
         # Select sampled data
         face_center_select = face_center_list[idxs]
@@ -355,7 +377,7 @@ class MeshSampler:
         
         return face_center_select, normal_select, rot_mat_select, face_vertices_select
     
-    def sample_body_pos_normal_jax(self, body_name: str, num_samples: int = 3):
+    def sample_body_pos_normal_jax(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
         Sample a position and normal vector from the body using JAX.
         
@@ -369,7 +391,7 @@ class MeshSampler:
         mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
         mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
         geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
-        face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal_jax(mesh_name, num_samples)
+        face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal_jax(mesh_name, num_samples, key)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
 
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
@@ -406,6 +428,7 @@ class MeshSampler:
         jacobian_contacts = []
         jacobian_bodies = []
         ext_wrenches = []
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site1") # TODO: change the hardcode case to fit the number of contact points
         for i in range(len(rots_mat_contact_geom)):
             rot_mat_contact_geom = rots_mat_contact_geom[i]
             rot_mat_contact_world = rot_mat_geom_world @ rot_mat_contact_geom
@@ -436,7 +459,6 @@ class MeshSampler:
             rot_mats_contact_com.append(rot_mat_contact_com)
             
             # Update the site position and quaternion for computing jacobian
-            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site1") # TODO: change the hardcode case to fit the number of contact points
             model.site_pos[site_id] = contact_pos_com
             rot = R.from_matrix(rot_mat_contact_com)
             quat_mujoco = rot.as_quat(scalar_first=True)
@@ -452,6 +474,14 @@ class MeshSampler:
             # print(f"Iter {i}: ========================")
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
+    
+    def update_model_data(self, model, data):
+        """
+        Update the model and data with the current mesh data.
+        This is useful when the model or data has been modified.
+        """
+        self.model = model
+        self.data = data
 
     def retrieve_data_dict(self, body_name: str):
         # body_id = self.model.body(body_name).id
@@ -499,18 +529,9 @@ class MeshSampler:
         return nearest_positions, normals, rot_mats, faces_vertices_select
     
     def compute_nearest_positions_jax(self, positions: jnp.ndarray, sample_body_name: str):
-        import time
-        # start = time.time()
         data_dict = self.retrieve_data_dict(sample_body_name)
-        # print("Data dict retrieval time:", time.time() - start)
         faces_center_local = data_dict["face_center_list_jax"]
-        # start = time.time()
         indices = batchwise_nearest_jax(positions, faces_center_local)
-        # print("Batchwise nearest time:", time.time() - start)
-        # nearest_positions = faces_center_local[indices]
-        # normals = data_dict["normal_list_jax"][indices]
-        # rot_mats = data_dict["rot_mat_list_jax"][indices]
-        # faces_vertices_select = data_dict["face_vertices_list_jax"][indices]
         nearest_positions = slice_with_indices(faces_center_local, indices)
         normals = slice_with_indices(data_dict["normal_list_jax"], indices)
         rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
@@ -524,6 +545,14 @@ if __name__ == "__main__":
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=True)
+    # vis_mesh_body_name = "link1"
+    # print(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
+    # mesh_id = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_id"]
+    # mesh_sampler.visualize_mesh(mesh_id=mesh_id, faces_start=8120, faces_end=8450)
     mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link7", num_samples=5)
     print(faces_center_local)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
+    
+    # 0, -1
+    # 675, 5979; 6236, -1
+    # 400, 1000; 1000, 8120; 8451, -1; 

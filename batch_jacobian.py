@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from mujoco import mjx
 import numpy as np
-# jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)
     
 """
 Batch computing the contact position and rotation matrix in the CoM frame.

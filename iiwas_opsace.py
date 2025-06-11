@@ -122,6 +122,10 @@ def main() -> None:
         # Enable site frame visualization.
         viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
         
+        # test QP solver
+        from utils.qp_solver import QPSolver
+        qp_solver = QPSolver(njoints=7, n_contacts=1, mu=200.0)
+        
         while viewer.is_running():
             step_start = time.time()
             
