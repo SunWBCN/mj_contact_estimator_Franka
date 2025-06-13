@@ -73,19 +73,19 @@ def main() -> None:
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=1)
     
-    # Fixed value for testing
-    geom_id = 60
-    contact_poss_geom = np.array([np.array([ 0.00244227, 0.03933891, -0.02926769])])
-    normal_vecs_geom = np.array([np.array([-0.75993156, -0.47094217, 0.44801494])])
-    rots_mat_contact_geom = np.array([
-                            np.array(
-                                        [
-                                        [-0.59587467, -0.25967506, -0.7599316],
-                                        [0.78010535, -0.41187733, -0.4709422],
-                                        [-0.19070667, -0.8734563, 0.44801497]
-                                        ]
-                                     )
-                            ])
+    # # Fixed value for testing
+    # geom_id = 60
+    # contact_poss_geom = np.array([np.array([ 0.00244227, 0.03933891, -0.02926769])])
+    # normal_vecs_geom = np.array([np.array([-0.75993156, -0.47094217, 0.44801494])])
+    # rots_mat_contact_geom = np.array([
+    #                         np.array(
+    #                                     [
+    #                                     [-0.59587467, -0.25967506, -0.7599316],
+    #                                     [0.78010535, -0.41187733, -0.4709422],
+    #                                     [-0.19070667, -0.8734563, 0.44801497]
+    #                                     ]
+    #                                  )
+    #                         ])
     ext_f_norm = 5.0
     
     applied_times = 0
@@ -124,7 +124,7 @@ def main() -> None:
         
         # test QP solver
         from utils.qp_solver import QPSolver
-        qp_solver = QPSolver(njoints=7, n_contacts=1, mu=200.0)
+        qp_solver = QPSolver(n_joints=7, n_contacts=1, mu=200.0)
         
         while viewer.is_running():
             step_start = time.time()
