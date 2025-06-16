@@ -7,6 +7,10 @@ import jax.numpy as jnp
 from mujoco import mjx
 import numpy as np
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
     
 """
 Batch computing the contact position and rotation matrix in the CoM frame.
@@ -79,9 +83,13 @@ def compute_batch_site_jac_pipeline(rot_mats_contact_geom, contact_poss_geom, ro
     Compute the batch site Jacobian using the provided rotation matrices and contact positions.
     """
     contact_poss_coms, rot_mats_contact_com = compute_batch_contact_pos_rot_com(rot_mats_contact_geom, contact_poss_geom, rot_mat_geom_world, rot_mat_com_world, geom_pos_world, com_pos_world)
+    jax.block_until_ready(contact_poss_coms)
     quats = compute_batch_rotation_matrix_to_quaternion(rot_mats_contact_com)
+    jax.block_until_ready(quats)
     mjx_model = update_site_pos_quat(mjx_model, site_ids, contact_poss_coms, quats)
+    jax.block_until_ready(mjx_model)
     jacobians = compute_batch_site_jac(mjx_model, qpos, site_ids)
+    jax.block_until_ready(jacobians)
     return jacobians, contact_poss_coms, rot_mats_contact_com, quats
 
 if __name__ == "__main__":
@@ -98,7 +106,7 @@ if __name__ == "__main__":
     data = mjx.get_data(model, mjx_data)
 
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
-    sample_body_name = "link7"
+    sample_body_name = "link5"
     num_samples = 100
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=num_samples)
     ext_f_norm = 5.0
@@ -126,7 +134,7 @@ if __name__ == "__main__":
         rot_mat_contact_com = rot_mat_com_world.T @ rot_mat_contact_world
         
         # Update the site position and quaternion for computing jacobian
-        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{i}") # TODO: change the hardcode case to fit the number of contact points
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{2+i}") # TODO: change the hardcode case to fit the number of contact points
         model.site_pos[site_id] = contact_pos_com
         rot = R.from_matrix(rot_mat_contact_com)
         quat = rot.as_quat(scalar_first=True)
@@ -152,7 +160,7 @@ if __name__ == "__main__":
         jax.block_until_ready(quats)
         print("Time:", time.time() - start)
         
-    site_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{i}") for i in range(len(rot_mats_contact_geom))]
+    site_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{2+i}") for i in range(len(rot_mats_contact_geom))]
     site_ids = jnp.array(site_ids)  # shape (n_particles, )
         
     import time
@@ -191,6 +199,8 @@ if __name__ == "__main__":
         jax.block_until_ready(jacobians)
         print(f"[{i}] Time: {time.time() - start:.4f}s")
 
-    # # Test the if the output matches the ground truth
-    # jacs_site_contact_mj = jnp.array(jacs_site_contact_mj)  # shape (n_particles, 3, nv)
-    # print()
+    # Test the if the output matches the ground truth
+    jacs_site_contact_mj = jnp.array(jacs_site_contact_mj)  # shape (n_particles, 3, nv)
+    for i in range(len(rot_mats_contact_geom)):
+        print(jnp.allclose(jacs_site_contact_mj[i], jacobians[i]))  # Check if the jacobian matches
+    print()

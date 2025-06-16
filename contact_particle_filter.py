@@ -5,9 +5,7 @@ from mujoco import mjx
 from pathlib import Path
 import mujoco
 from batch_jacobian import compute_batch_site_jac_pipeline
-from batch_qp import solve_batch_qp
 import jax
-import time
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
 
@@ -26,19 +24,19 @@ def slice_with_indices(array, indices):
 # TODO: convert the code to use jnp instead of np
 class ContactParticleFilter:
     def __init__(self, model, data, n_particles=1000, robot_name="kuka_iiwa_14", sample_body_name="link7", ext_f_norm=5.0,
-                 importance_distribution_noise=0.01, measurement_noise=0.01):
+                 importance_distribution_noise=0.01, measurement_noise=0.01, contact_particle_gt=None):
         self.n_particles = n_particles
         self.sampler = mesh_sampler.MeshSampler(model, data, False, robot_name)
         self.sample_body_name = sample_body_name
         self.ext_f_norm = ext_f_norm
-        self.initialize_particles()
+        self.initialize_particles(contact_particle_gt)
         self.importance_distribution_noise = importance_distribution_noise
         self.measurement_noise = measurement_noise
         self.model = model
         self.data = data
         self.sample_body_id = model.body(sample_body_name).id
     
-    def initialize_particles(self):
+    def initialize_particles(self, contact_particle_gt=None):
         randomseed = np.random.randint(0, 1000000)
         key = jax.random.PRNGKey(randomseed)
         mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
@@ -49,6 +47,14 @@ class ContactParticleFilter:
         self.face_vertices_select = face_vertices_select
         self.geom_id = geom_id
         self.weight = jnp.ones(self.n_particles) / self.n_particles
+        
+        if contact_particle_gt is not None:
+            contact_pos_geom_gt, normal_vec_geom_gt, rot_mat_contact_gt, face_vertice_select_gt = contact_particle_gt
+            self.particles = self.particles.at[0].set(jnp.array(contact_pos_geom_gt))
+            self.forces_normal = self.forces_normal.at[0].set(jnp.array(normal_vec_geom_gt * self.ext_f_norm))
+            self.rots_mat_contact = self.rots_mat_contact.at[0].set(jnp.array(rot_mat_contact_gt))
+            self.face_vertices_select = self.face_vertices_select.at[0].set(jnp.array(face_vertice_select_gt))
+            
         self.particle_center = jnp.mean(self.particles, axis=0)
         return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_id
         
@@ -115,6 +121,7 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, batch_qp_solve
             else:
                 params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau))
         cpf.update_weights(errors)
+        print(jnp.min(errors), jnp.mean(errors), jnp.max(errors), "errors")
         key, subkey = jax.random.split(key)
         particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_id = cpf.resample_particles(subkey, method='multinomial')
         particle_history.append(particles)
@@ -125,13 +132,14 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
     particle_axes = axes[0]  # Top row for particle evolution
     error_ax = axes[1, 1]    # Bottom center for error evolution
     particle_center_ax = axes[1, 0] # Bottom left for error of particle center
+    minimum_error_ax = axes[1, 2] # Bottom right for minimum error
 
     x_limit = 0.2
     y_limit = 0.2
 
     def update(frame):
         particles = particle_history[frame]
-        particle_center = jnp.mean(particles, axis=0)
+        particles_center = jnp.mean(jnp.array(particle_history[:frame + 1]), axis=1)
         for ax in particle_axes:
             ax.clear()
 
@@ -172,13 +180,23 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
         
         # Update the error plot for particle center
         particle_center_ax.clear()
-        particle_center_error = jnp.linalg.norm(particle_center - contact_pos_target)
-        particle_center_ax.plot(range(1, frame + 2), [particle_center_error] * (frame + 1), marker='o', linestyle='-', color='green')
+        particles_center_error = jnp.linalg.norm(particles_center - contact_pos_target, axis=1)
+        particle_center_ax.plot(range(1, frame + 2), particles_center_error, marker='o', linestyle='-', color='green')
         particle_center_ax.set_title("Error of Particle Center")
         particle_center_ax.set_xlabel("Iteration")
         particle_center_ax.set_ylabel("Error")
         particle_center_ax.set_ylim(0, 0.1)
         particle_center_ax.grid(True)
+        
+        # Update the minimum error plot
+        minimum_error_ax.clear()
+        min_error = jnp.min(jnp.array(average_errors[:frame + 1]))
+        minimum_error_ax.plot(range(1, frame + 2), [min_error] * (frame + 1), marker='o', linestyle='-', color='orange')
+        minimum_error_ax.set_title("Minimum Error")
+        minimum_error_ax.set_xlabel("Iteration")
+        minimum_error_ax.set_ylabel("Minimum Error")
+        minimum_error_ax.set_ylim(0, 1)
+        minimum_error_ax.grid(True)
 
     fps = 60
     interval = 1000 / fps  # milliseconds

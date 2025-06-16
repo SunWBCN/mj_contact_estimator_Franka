@@ -364,7 +364,7 @@ class MeshSampler:
         face_center_list = mesh_data["face_center_list_jax"]
         normal_list = mesh_data["normal_list_jax"]
         rot_mat_list = mesh_data["rot_mat_list_jax"]
-        face_vertices_list = mesh_data["face_vertices_list"]
+        face_vertices_list = mesh_data["face_vertices_list_jax"]
 
         # Sample indices
         idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
