@@ -21,6 +21,108 @@ def get_contact_pos_rot(mjx_data, geom_id, sample_body_id):
 def slice_with_indices(array, indices):
     return jax.vmap(lambda i: array[i])(indices)
 
+@jax.jit
+def vec_world_coor(vec_local, rot_mat_local_world, pos_local_world):
+    """
+    Convert vectors from local coordinates to world coordinates.
+    
+    Args:
+        vecs_local: Local vectors (3).
+        rot_mat_local_world: Rotation matrix from local to world coordinates (3, 3).
+        pos_local_world: Position vector in world coordinates (3,).
+    
+    Returns:
+        vecs_world: Vectors in world coordinates (N, 3).
+    """
+    return pos_local_world + jnp.dot(rot_mat_local_world, vec_local)
+
+@jax.jit
+def batch_vecs_world_coor(vecs_local, rot_mat_local_world, pos_local_world):
+    """
+    Convert vectors from local coordinates to world coordinates in batch.
+    
+    Args:
+        vecs_local: Local vectors (N, 3).
+        rot_mat_local_world: Rotation matrix from local to world coordinates (3, 3).
+        pos_local_world: Position vector in world coordinates (3,).
+    
+    Returns:
+        vecs_world: Vectors in world coordinates (N, 3).
+    """
+    return jax.vmap(vec_world_coor, in_axes=(0, None, None))(vecs_local, rot_mat_local_world, pos_local_world)
+
+def friction_cone_basis_jax(n, mu, k=4):
+    n = n / jnp.linalg.norm(n)
+    theta = jnp.arctan(mu)
+    
+    # Tangent vectors
+    # if jnp.allclose(n[:2], 0):
+    #     t1 = jnp.array([1, 0, 0])
+    # else:
+    t1 = jnp.array([-n[1], n[0], 0])
+    t1 /= jnp.linalg.norm(t1)
+    t2 = jnp.cross(n, t1)
+    
+    phi = jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)
+
+    # Compute basis vectors using broadcasting
+    F_basis = jnp.cos(theta) * n[:, None] + jnp.sin(theta) * (
+        jnp.cos(phi)[None, :] * t1[:, None] + jnp.sin(phi)[None, :] * t2[:, None]
+    )
+    return F_basis
+
+friction_cone_basis_jax = jax.jit(friction_cone_basis_jax, static_argnums=(2,))
+
+@jax.jit
+def batch_friction_cone_basis_jax(ns, mu, k=4):
+    """
+    Batch version of friction_cone_basis_jax.
+    
+    Args:
+        ns: Normals (N, 3).
+        mu: Friction coefficient.
+        k: Number of basis vectors.
+    
+    Returns:
+        F_basis: Friction cone basis vectors (N, 3, k).
+    """
+    return jax.vmap(friction_cone_basis_jax, in_axes=(0, None, None))(ns, mu, k)
+
+def batch_friction_cone_basis(normals, mu, k=8):
+    """
+    Compute the friction cone basis vectors for a batch of normal vectors.
+
+    Args:
+        normals (np.ndarray): Normal vectors (N, 3).
+        mu (float): Friction coefficient.
+        k (int): Number of basis vectors.
+
+    Returns:
+        np.ndarray: Friction cone basis vectors (N, k, 3).
+    """
+    # Normalize the normal vectors
+    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+    # Compute tangent vectors
+    t1 = np.cross(normals, np.array([0, 0, 1]))
+    t1 = t1 / np.linalg.norm(t1, axis=1, keepdims=True)
+    t2 = np.cross(normals, t1)
+
+    # Compute angles for basis vectors
+    phi = np.linspace(0, 2 * np.pi, k, endpoint=False)
+
+    # Compute basis vectors using broadcasting
+    theta = np.arctan(mu)
+    F_basis = (
+        np.cos(theta) * normals[:, None, :]
+        + np.sin(theta) * (
+            np.cos(phi)[None, :, None] * t1[:, None, :]
+            + np.sin(phi)[None, :, None] * t2[:, None, :]
+        )
+    )
+
+    return F_basis
+
 # TODO: convert the code to use jnp instead of np
 class ContactParticleFilter:
     def __init__(self, model, data, n_particles=1000, robot_name="kuka_iiwa_14", sample_body_name="link7", ext_f_norm=5.0,
@@ -90,7 +192,7 @@ class ContactParticleFilter:
         return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_id
 
 def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, batch_qp_solver, iters=20, particle_history=[], 
-             average_errors=[], data_log=None, qp_loss=True, qp_solver=None):
+             average_errors=[], data_log=None, qp_loss=True, qp_solver=None, polyhedral_num=4):
     geom_pos_world, rot_mat_geom_world, com_pos_world, rot_mat_com_world = get_contact_pos_rot(mjx_data, cpf.geom_id,
                                                                                                cpf.sample_body_id)
     qpos = mjx_data.qpos
@@ -104,6 +206,11 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, batch_qp_solve
         
         # wait till the jacobian is computed
         jax.block_until_ready(jacobians)
+        
+        # Compute the contact position basis
+        normal_vecs_world = batch_vecs_world_coor(forces_normal, rot_mat_geom_world, geom_pos_world)
+        friction_cone_basises = batch_friction_cone_basis(normal_vecs_world, mu=batch_qp_solver.mu, k=polyhedral_num)
+        
         if not qp_loss:
             contact_pos_target = data_log["contact_pos_target"]
             measurement_noise = cpf.measurement_noise
@@ -119,9 +226,10 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, site_ids, batch_qp_solve
                     errors.append(error)
                 errors = jnp.array(errors).flatten()
             else:
-                params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau))
+                params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau),
+                                                                 np.array(friction_cone_basises),)
         cpf.update_weights(errors)
-        print(jnp.min(errors), jnp.mean(errors), jnp.max(errors), "errors")
+        # print(jnp.min(errors), jnp.mean(errors), jnp.max(errors), "errors")
         key, subkey = jax.random.split(key)
         particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_id = cpf.resample_particles(subkey, method='multinomial')
         particle_history.append(particles)

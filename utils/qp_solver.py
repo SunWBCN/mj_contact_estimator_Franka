@@ -146,12 +146,12 @@ class QPSolver:
         # Return the results
         return self.f_c.value, self.objective.value
     
-class BatchQPSolver:
+class BatchNonlinerQPSolver:
     def __init__(self, n_joints, n_contacts, n_qps, mu=0.5):
         """
         Initialize the batch QP solver.
 
-        Args:
+        Args:   
             n_joints (int): Number of joints in the robot.
             n_contacts (int): Number of contact points.
             n_qps (int): Number of QPs to solve simultaneously.
@@ -212,6 +212,79 @@ class BatchQPSolver:
         for i in range(self.n_qps):
             self.Jc[i].value = Jc_batch[i, :, :]
         self.tau_ext.value = tau_ext
+
+        # Solve the problem
+        self.prob.solve(solver=cp.OSQP, warm_start=True)
+
+        # Compute the residuals
+        residuals = [self.Jc[i].value.T @ self.f_c[i].value - self.tau_ext.value for i in range(self.n_qps)]
+        residuals = np.array(residuals)
+        residuals = np.linalg.norm(residuals, axis=1)
+
+        f_c_values = np.array([fc.value for fc in self.f_c])
+
+        # Return the results
+        return f_c_values, self.objective.value, residuals
+                
+class BatchQPSolver:
+    def __init__(self, n_joints, n_contacts, n_qps, mu=0.5, polyhedral_num=4):
+        """
+        Initialize the batch QP solver.
+
+        Args:   
+            n_joints (int): Number of joints in the robot.
+            n_contacts (int): Number of contact points.
+            n_qps (int): Number of QPs to solve simultaneously.
+            mu (float): Friction coefficient.
+        """
+        self.n_joints = n_joints
+        self.n_contacts = n_contacts
+        self.n_qps = n_qps
+        self.mu = mu
+        self.polyhedral_num = polyhedral_num
+
+        # Define the contact force variable for all QPs
+        self.friction_cone_basis = [cp.Parameter((self.n_contacts * self.polyhedral_num, 3)) for _ in range(self.n_qps)]
+        self.alpha_c = [cp.Variable(self.n_contacts * self.polyhedral_num) for _ in range(self.n_qps)]  # Coefficients for the friction cone basis vectors
+        self.f_c = [self.alpha_c[i] @ self.friction_cone_basis[i] for i in range(self.n_qps)]  # Contact forces as a linear combination of basis vectors
+
+        # Define parameters for Jacobians and external torques
+        # self.Jc = cp.Parameter((self.n_qps, 3 * self.n_contacts, self.n_joints))  # Jacobian matrices for all QPs
+        self.Jc = [cp.Parameter((3 * self.n_contacts, self.n_joints)) for _ in range(self.n_qps)]  # Individual Jacobian for each QP
+        self.tau_ext = cp.Parameter((self.n_joints))  # External torques for all QPs
+
+        # Define the objective function (sum of squared residuals for all QPs)
+        residuals = [self.Jc[i].T @ self.f_c[i] - self.tau_ext for i in range(self.n_qps)]
+        self.objective = cp.Minimize(cp.sum([cp.sum_squares(res) for res in residuals]))
+
+        # Define the constraints for all QPs
+        self.constraints = []
+        for i in range(self.n_qps):
+            for j in range(self.n_contacts * self.polyhedral_num):
+                self.constraints.append(self.alpha_c[i][j] >= 0)
+
+        # Define the problem
+        self.prob = cp.Problem(self.objective, self.constraints)
+
+    def solve(self, Jc_batch, tau_ext, Friction_cone_basises):
+        """
+        Solve the batch QP problem with updated parameters.
+
+        Args:
+            Jc_batch (np.ndarray): Batch of Jacobian matrices of size (3, n_joints, n_qps).
+            tau_ext_batch (np.ndarray): Batch of external torques of size (n_joints, n_qps).
+
+        Returns:
+            np.ndarray: Estimated contact forces of size (3 * n_contacts, n_qps).
+            float: Loss value of the optimization problem.
+        """
+        # Update the parameters
+        # self.Jc.value = Jc_batch
+        for i in range(self.n_qps):
+            self.Jc[i].value = Jc_batch[i, :, :]
+        self.tau_ext.value = tau_ext
+        for i in range(self.n_qps):
+            self.friction_cone_basis[i].value = Friction_cone_basises[i, :, :]
 
         # Solve the problem
         self.prob.solve(solver=cp.OSQP, warm_start=True)

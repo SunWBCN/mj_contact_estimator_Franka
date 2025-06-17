@@ -89,12 +89,12 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    sample_body_name = "link7"
+    sample_body_name = "link6"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     import time
     start_time = time.time()
     randomseed = np.random.randint(0, 10000)
-    randomseed = 0
+    # randomseed = 0
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal_jax(sample_body_name, num_samples=1, key=jax.random.PRNGKey(randomseed))
     print("Time taken to sample mesh point:", time.time() - start_time)
@@ -140,7 +140,7 @@ def main() -> None:
         mjx_data = warmup_jit(mjx_model, mjx_data, model, data, sample_body_name=sample_body_name)
         data = mjx.get_data(model, mjx_data)
         cpf = ContactParticleFilter(model=model, data=data, n_particles=100, robot_name="kuka_iiwa_14", sample_body_name=sample_body_name, ext_f_norm=ext_f_norm,
-                                importance_distribution_noise=0.1, measurement_noise=0.1, contact_particle_gt=contact_particle_gt)
+                                importance_distribution_noise=0.02, measurement_noise=0.02, contact_particle_gt=contact_particle_gt)
         cpf.initialize_particles()
         site_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site{2+i}") for i in range(cpf.n_particles)]
         site_ids = jnp.array(site_ids)  # shape (n_particles, )
@@ -153,9 +153,10 @@ def main() -> None:
         gt_ext_tau = jnp.zeros(model.nv)
         update_gt_ext_tau = False
         mu = 200.0
-        polyhedral_num = 1024
+        polyhedral_num = 4
         qp_solver = QPSolver(n_joints=model.nv, n_contacts=1, mu=mu, polyhedral_num=polyhedral_num)
-        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=1, n_qps=cpf.n_particles, mu=mu)
+        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=1, n_qps=cpf.n_particles, mu=mu,
+                                        polyhedral_num=polyhedral_num)
         qp_nonlinear_solver = QPNonlinearSolver(n_joints=model.nv, n_contacts=1, mu=mu)
     
     carry = {"carry_particles": {}, "carry_mat_arrows": {}, "carry_normal_arrows": {}}
@@ -249,23 +250,23 @@ def main() -> None:
             data_log = {"contact_pos_target": contact_pos_target, "jacobian_contact": jacobian_contacts[0], "ext_wrenches": ext_wrenches[0]}
             if update_gt_ext_tau:
                 cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, site_ids=site_ids, particle_history=particle_history, average_errors=average_errors, iters=10,
-                        data_log=data_log, batch_qp_solver=batch_qp_solver)            
+                        data_log=data_log, batch_qp_solver=batch_qp_solver, polyhedral_num=polyhedral_num)            
             carry["carry_particles"]["geom_origin_pos_world"] = geom_pos_world
             carry["carry_particles"]["geom_origin_mat_world"] = rot_mat_geom_world
             carry["carry_particles"]["particles_pos_geom"] = cpf.particles
             carry["carry_particles"]["particles_mat_geom"] = cpf.rots_mat_contact
                     
-        # Compute the inverse dynamics torques.
+        # # Compute the inverse dynamics torques.
         # mujoco.mj_forward(model, data)
         # mujoco.mj_inverse(model, data)
 
-        # The total joint torques (including gravity, Coriolis, and external forces)
-        tau_total = data.qfrc_inverse.copy()
-        mjx_data = jit_inverse(mjx_model, mjx_data) if use_mjx else mujoco.mj_inverse(model, data)
-        tau_total = mjx_data.qfrc_inverse.copy() if use_mjx else data.qfrc_inverse.copy()
+        # # The total joint torques (including gravity, Coriolis, and external forces)
+        # tau_total = data.qfrc_inverse.copy()
+        # mjx_data = jit_inverse(mjx_model, mjx_data) if use_mjx else mujoco.mj_inverse(model, data)
+        # tau_total = mjx_data.qfrc_inverse.copy() if use_mjx else data.qfrc_inverse.copy()
         
         # Compute the joint space external torques
-        gt_ext_tau_ = tau_total - tau
+        # gt_ext_tau_ = tau_total - tau
         gt_ext_tau = jnp.dot(jacobian_contacts[0].T, ext_wrenches[0])
         if not update_gt_ext_tau:
             update_gt_ext_tau = True
