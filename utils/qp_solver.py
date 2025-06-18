@@ -287,7 +287,7 @@ class BatchQPSolver:
             self.friction_cone_basis[i].value = Friction_cone_basises[i, :, :]
 
         # Solve the problem
-        self.prob.solve(solver=cp.OSQP, warm_start=True)
+        self.prob.solve(solver=cp.MOSEK, warm_start=True)
 
         # Compute the residuals
         residuals = [self.Jc[i].value.T @ self.f_c[i].value - self.tau_ext.value for i in range(self.n_qps)]
