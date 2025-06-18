@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from mujoco import mjx
 from pathlib import Path
 import mujoco
-from batch_jacobian import compute_batch_site_jac_pipeline
+from utils.batch_jacobian import compute_batch_site_jac_pipeline
 import jax
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
