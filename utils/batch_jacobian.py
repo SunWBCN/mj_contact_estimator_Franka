@@ -28,8 +28,9 @@ def compute_contact_pos_rot_com(rot_mat_contact_geom, contact_pos_geom, rot_mat_
     return contact_pos_com, rot_mat_contact_com
 
 @jax.jit
-def compute_batch_contact_pos_rot_com(rot_mat_contact_geoms, contact_pos_geoms, rot_mat_geom_world, rot_mat_com_world, geom_pos_world, com_pos_world):
-    contact_poss_coms, rot_mats_contact_com = jax.vmap(compute_contact_pos_rot_com, in_axes=(0, 0, None, None, None, None))(rot_mat_contact_geoms, contact_pos_geoms, rot_mat_geom_world, rot_mat_com_world, geom_pos_world, com_pos_world)
+def compute_batch_contact_pos_rot_com(rot_mat_contact_geoms, contact_pos_geoms, rot_mats_geom_world, rot_mats_com_world, geom_poss_world, com_poss_world):
+    contact_poss_coms, rot_mats_contact_com = \
+    jax.vmap(compute_contact_pos_rot_com, in_axes=(0, 0, 0, 0, 0, 0))(rot_mat_contact_geoms, contact_pos_geoms, rot_mats_geom_world, rot_mats_com_world, geom_poss_world, com_poss_world)
     return contact_poss_coms, rot_mats_contact_com
     
 """
@@ -76,13 +77,15 @@ def compute_batch_site_jac(mjx_model, qpos, site_ids):
     return jax.vmap(jac_fn, in_axes=(None, None, 0))(mjx_model, qpos, site_ids)
 
 @jax.jit
-def compute_batch_site_jac_pipeline(rot_mats_contact_geom, contact_poss_geom, rot_mat_geom_world,
-                                    rot_mat_com_world, geom_pos_world, com_pos_world, mjx_model,
+def compute_batch_site_jac_pipeline(rot_mats_contact_geom, contact_poss_geom, rot_mats_geom_world,
+                                    rot_mats_com_world, geom_poss_world, com_poss_world, mjx_model,
                                     mjx_data, qpos, site_ids):
     """
     Compute the batch site Jacobian using the provided rotation matrices and contact positions.
     """
-    contact_poss_coms, rot_mats_contact_com = compute_batch_contact_pos_rot_com(rot_mats_contact_geom, contact_poss_geom, rot_mat_geom_world, rot_mat_com_world, geom_pos_world, com_pos_world)
+    contact_poss_coms, rot_mats_contact_com \
+    = compute_batch_contact_pos_rot_com(rot_mats_contact_geom, contact_poss_geom,
+                                        rot_mats_geom_world, rot_mats_com_world, geom_poss_world, com_poss_world)
     jax.block_until_ready(contact_poss_coms)
     quats = compute_batch_rotation_matrix_to_quaternion(rot_mats_contact_com)
     jax.block_until_ready(quats)

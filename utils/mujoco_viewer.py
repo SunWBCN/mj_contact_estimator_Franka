@@ -467,8 +467,8 @@ class MujocoViewer(Callbacks):
             rgba: Color of the particles (R, G, B, A)
             radius: Radius of the particles
         """
-        geom_origin_pos_world = carry_particles["geom_origin_pos_world"]
-        geom_origin_mat_world = carry_particles["geom_origin_mat_world"]
+        geom_origin_poss_world = carry_particles["geom_origin_poss_world"]
+        geom_origin_mats_world = carry_particles["geom_origin_mats_world"]
         particles_pos_geom = carry_particles["particles_pos_geom"]
         particles_mat_geom = carry_particles["particles_mat_geom"]
         rgba = carry_particles.get("rgba", np.array([1.0, 0.0, 0.0, 1.0]))
@@ -485,7 +485,7 @@ class MujocoViewer(Callbacks):
                 mat=sphere_rot_mat_world.flatten(),
                 rgba=rgba.astype(np.float32),
             )
-        for pos_geom, rot_mat_geom in zip(particles_pos_geom, particles_mat_geom):
+        for pos_geom, rot_mat_geom, geom_origin_pos_world, geom_origin_mat_world in zip(particles_pos_geom, particles_mat_geom, geom_origin_poss_world, geom_origin_mats_world):
             sphere_mat_world = geom_origin_mat_world @ rot_mat_geom
             sphere_pos_world = geom_origin_pos_world + geom_origin_mat_world @ pos_geom
             update_scene(self.scn, sphere_pos_world, sphere_mat_world, rgba, radius)

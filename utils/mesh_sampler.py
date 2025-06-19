@@ -72,6 +72,21 @@ def batchwise_nearest_jax(queries, references):
 def slice_with_indices(array, indices):
     return jax.vmap(lambda i: array[i])(indices)
 
+from typing import List
+def assign_indices_to_names(lengths: jnp.ndarray, indices: jnp.ndarray, names: List[str]) -> List[str]:
+    # Compute start and end of each segment
+    segment_starts = jnp.cumsum(jnp.concatenate([jnp.array([0]), lengths[:-1]]))
+    segment_ends = jnp.cumsum(lengths)
+
+    # Determine segment id for each index
+    in_segment = (indices[None, :] >= segment_starts[:, None]) & \
+                 (indices[None, :] < segment_ends[:, None])
+    segment_ids = jnp.argmax(in_segment, axis=0)
+
+    # Map segment ids to names (names is a Python list, use take or list comprehension)
+    assigned_names = [names[int(seg_id)] for seg_id in segment_ids]
+    return assigned_names
+
 feasible_region_idxes = {"link_7": [[988, -1]], "link_6_orange": [[0, -1]], "link_5": [[800, 1800], [2000, -1]],
                          "link_4_orange": [[0, -1]], "link_3": [[675, 5979], [6236, -1]], "link_2_orange": [[0, -1]],
                          "link_1": [[400, 1000], [1000, 8120], [8451, -1]]}
@@ -182,6 +197,7 @@ class MeshSampler:
         # Generate a mapping from body names to mesh and geom names
         body_names = [self.model.body(i).name for i in range(self.model.nbody) if "link" in self.model.body(i).name]
         body_names_mapping = {}
+        mesh_names_mapping = {}
         for body_name in body_names:
             body_id = self.model.body(body_name).id
             geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
@@ -204,7 +220,10 @@ class MeshSampler:
                 "geom_names": self.data_dict[mesh_name]["geom_names"],
                 "geom_ids": self.data_dict[mesh_name]["geom_ids"]
             }
+            
+            mesh_names_mapping[mesh_name] = body_name
         self.data_dict["body_names_mapping"] = body_names_mapping
+        self.data_dict["mesh_names_mapping"] = mesh_names_mapping
 
         xml_path = (Path(__file__).resolve().parent / ".." / f"{self.robot_name}/mesh_data").as_posix()
         file_name = f"{xml_path}/mesh_data_dict.npy"
@@ -394,6 +413,92 @@ class MeshSampler:
         face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal_jax(mesh_name, num_samples, key)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
 
+    def update_sampling_space_jax(self, body_names: list):
+        mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
+        faces_center_list = []
+        normals_list = []
+        rot_mats_list = []
+        faces_vertices_list = []
+        sample_nums = []
+        for mesh_name in mesh_names:
+            mesh_data = self.data_dict[mesh_name]
+            face_center_list = mesh_data["face_center_list_jax"]
+            normal_list = mesh_data["normal_list_jax"]
+            rot_mat_list = mesh_data["rot_mat_list_jax"]
+            face_vertices_list = mesh_data["face_vertices_list_jax"]
+            faces_center_list.append(face_center_list)
+            normals_list.append(normal_list)
+            rot_mats_list.append(rot_mat_list)
+            faces_vertices_list.append(face_vertices_list)
+            sample_nums.append(len(face_center_list))
+        
+        # Concatenate the lists
+        face_center_list = jnp.concatenate(faces_center_list, axis=0)
+        normal_list = jnp.concatenate(normals_list, axis=0)
+        rot_mat_list = jnp.concatenate(rot_mats_list, axis=0)
+        face_vertices_list = jnp.concatenate(faces_vertices_list, axis=0)
+        
+        # Update parameter as search space
+        self.data_dict["search_space"] = {
+            "face_center_list": face_center_list,
+            "normal_list": normal_list,
+            "rot_mat_list": rot_mat_list,
+            "face_vertices_list": face_vertices_list,
+            "sample_nums": jnp.array(sample_nums),
+        }
+
+    def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        """
+        Sample a position and normal vector from the mesh using JAX.
+        
+        Args:
+            mesh_name: List of the mesh names to sample from.
+        
+        Returns:
+            pos: Sampled position (3D vector).
+            normal: Sampled normal vector (3D vector).
+        """
+        face_center_list = self.data_dict["search_space"]["face_center_list"]
+        normal_list = self.data_dict["search_space"]["normal_list"]
+        rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
+        face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
+        sample_nums = self.data_dict["search_space"]["sample_nums"]
+
+        # Sample indices
+        idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
+        
+        # Get the link names corresponding to the sampled indices
+        link_names = [self.data_dict["mesh_names_mapping"][mesh_name] for mesh_name in mesh_names]
+        randomized_link_names = assign_indices_to_names(jnp.array(sample_nums), idxs, link_names)
+        randomized_link_names = np.array(randomized_link_names)
+        
+        # Select sampled data
+        face_center_select = face_center_list[idxs]
+        normal_select = normal_list[idxs]
+        rot_mat_select = rot_mat_list[idxs]
+        face_vertices_select = face_vertices_list[idxs]
+        mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in randomized_link_names])
+        geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
+        
+        return face_center_select, normal_select, rot_mat_select, face_vertices_select, randomized_link_names, \
+               mesh_ids, geom_ids
+
+    def sample_bodies_pos_normal_jax(self, body_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        """
+        Sample a position and normal vector from the body using JAX.
+        
+        Args:
+            body_name: List of the body names to sample from.
+        
+        Returns:
+            pos: Sampled position (3D vector).
+            normal: Sampled normal vector (3D vector).
+        """
+        mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
+        face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names, mesh_ids, geom_ids \
+        = self.sample_poss_normal_jax(mesh_names, num_samples, key)
+        return mesh_ids, geom_ids, face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names
+
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
         """
         Sample a position and normal vector from the body.
@@ -537,6 +642,24 @@ class MeshSampler:
         rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
         faces_vertices_select = slice_with_indices(data_dict["face_vertices_list_jax"], indices)
         return nearest_positions, normals, rot_mats, faces_vertices_select
+        
+    def compute_nearest_positions_bodies_jax(self, positions: jnp.ndarray, body_names: list):
+        faces_center_local = self.data_dict["search_space"]["face_center_list"]
+        normal_list = self.data_dict["search_space"]["normal_list"]
+        rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
+        face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
+        sample_nums = self.data_dict["search_space"]["sample_nums"]
+        
+        indices = batchwise_nearest_jax(positions, faces_center_local)
+        nearest_positions = slice_with_indices(faces_center_local, indices)
+        normals = slice_with_indices(normal_list, indices)
+        rot_mats = slice_with_indices(rot_mat_list, indices)
+        faces_vertices_select = slice_with_indices(face_vertices_list, indices)
+        
+        # Get the link names corresponding to the sampled indices
+        randomized_link_names = assign_indices_to_names(sample_nums, indices, body_names)
+        randomized_geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
+        return nearest_positions, normals, rot_mats, faces_vertices_select, randomized_geom_ids, randomized_link_names
         
 if __name__ == "__main__":
     # Example usage
