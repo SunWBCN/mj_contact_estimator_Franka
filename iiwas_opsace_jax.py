@@ -17,7 +17,6 @@ from jax import numpy as jnp
 from utils.mujoco_viewer import MujocoViewer
 from utils.mjx_functions import *
 import matplotlib.pyplot as plt
-from friction_basis import friction_cone_basis
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
