@@ -96,6 +96,20 @@ class WrenchApplier:
         """
         apply_external_wrench(self.model, self.data, wrench, body_name)
     
+    def apply_wrenches(self, wrenches: np.ndarray, body_names: list):
+        """
+        Apply a list of wrenches to the specified body names.
+
+        Args:
+            wrenches: A list of wrench vectors to be applied (N, 6D)
+            body_names: A list of body names to which the wrenches will be applied
+        """
+        if len(wrenches) != len(body_names):
+            raise ValueError("The number of wrenches must match the number of body names.")       
+        
+        for wrench, body_name in zip(wrenches, body_names):
+            apply_external_wrench(self.model, self.data, wrench, body_name)
+    
     def reset(self):
         """
         Reset the wrench profile index to 0.

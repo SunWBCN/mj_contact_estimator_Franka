@@ -24,12 +24,27 @@ def apply_wrench_mjx(mjx_data, wrench, body_id):
     mjx_data = mjx_data.replace(xfrc_applied=xfrc_applied)
     return mjx_data
 
-def warmup_jit(mjx_model, mjx_data, model, data, tau=jnp.zeros(7), target_body_name="link7"):
+@jax.jit
+def apply_wrenches_mjx(mjx_data, wrenches, body_ids):
+    """
+    Apply a custom wrench to the specified body name using JAX.
+
+    Args:
+        mjx_model: JAX MuJoCo model
+        mjx_data: JAX MuJoCo data
+        wrench: Wrench vector to be applied (6D)
+        body_name: Body name to which the wrenches will be applied
+    """
+    xfrc_applied = mjx_data.xfrc_applied.at[body_ids].set(wrenches)
+    mjx_data = mjx_data.replace(xfrc_applied=xfrc_applied)
+    return mjx_data
+
+def warmup_jit(mjx_model, mjx_data, model, data, tau=jnp.zeros(7), target_body_names=["link7"]):
     mjx_data = update_ctrl_mjx(mjx_data, tau)
     mjx_data = jit_step(mjx_model, mjx_data)
     mjx_data = jit_inverse(mjx_model, mjx_data)
     mjx_data = jit_forward(mjx_model, mjx_data)
-    body_id = model.body(target_body_name).id
+    body_id = model.body(target_body_names[0]).id # just for warmup
     mjx_data = apply_wrench_mjx(mjx_data, jnp.zeros(6), body_id)
     return mjx_data
 

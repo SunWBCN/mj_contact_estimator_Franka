@@ -244,9 +244,9 @@ class BatchQPSolver:
         self.polyhedral_num = polyhedral_num
 
         # Define the contact force variable for all QPs
-        self.friction_cone_basis = [cp.Parameter((self.n_contacts * self.polyhedral_num, 3)) for _ in range(self.n_qps)]
-        self.alpha_c = [cp.Variable(self.n_contacts * self.polyhedral_num) for _ in range(self.n_qps)]  # Coefficients for the friction cone basis vectors
-        self.f_c = [self.alpha_c[i] @ self.friction_cone_basis[i] for i in range(self.n_qps)]  # Contact forces as a linear combination of basis vectors
+        self.friction_cone_basis = [[cp.Parameter((self.polyhedral_num, 3)) for i in range(self.n_contacts)] for _ in range(self.n_qps)]
+        self.alpha_c = [[cp.Variable(self.polyhedral_num) for i in range(self.n_contacts)] for _ in range(self.n_qps)]  # Coefficients for the friction cone basis vectors
+        self.f_c = [cp.hstack([alpha_c @ frcition_cone_basis for alpha_c, frcition_cone_basis in zip(self.alpha_c[i], self.friction_cone_basis[i])]) for i in range(self.n_qps)]  # Contact forces as a linear combination of basis vectors
 
         # Define parameters for Jacobians and external torques
         # self.Jc = cp.Parameter((self.n_qps, 3 * self.n_contacts, self.n_joints))  # Jacobian matrices for all QPs
@@ -260,8 +260,9 @@ class BatchQPSolver:
         # Define the constraints for all QPs
         self.constraints = []
         for i in range(self.n_qps):
-            for j in range(self.n_contacts * self.polyhedral_num):
-                self.constraints.append(self.alpha_c[i][j] >= 0)
+            for j in range(self.n_contacts):
+                for k in range(self.polyhedral_num):
+                    self.constraints.append(self.alpha_c[i][j][k] >= 0)
 
         # Define the problem
         self.prob = cp.Problem(self.objective, self.constraints)
@@ -284,7 +285,8 @@ class BatchQPSolver:
             self.Jc[i].value = Jc_batch[i, :, :]
         self.tau_ext.value = tau_ext
         for i in range(self.n_qps):
-            self.friction_cone_basis[i].value = Friction_cone_basises[i, :, :]
+            for j in range(self.n_contacts):
+                self.friction_cone_basis[i][j].value = Friction_cone_basises[i, :, :]
 
         # Solve the problem
         self.prob.solve(solver=cp.MOSEK, warm_start=True)

@@ -23,6 +23,48 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
+def sample_contacts(mesh_sampler, target_body_names: list, n_contacts_per_body: list, key=jax.random.PRNGKey(0)):
+    mesh_ids = []
+    geom_ids = []
+    contact_poss = []
+    normal_vecs = []
+    rot_mats_contact = []
+    face_vertices = []
+    total_target_body_names = []
+    for target_body_name, n_contact_per_body in zip(target_body_names, n_contacts_per_body):
+        mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
+        mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contact_per_body, key=key)
+        for _ in range(n_contact_per_body):
+            mesh_ids.append(mesh_id)
+            geom_ids.append(geom_id)
+            total_target_body_names.append(target_body_name)
+        contact_poss.append(contact_poss_geom)
+        normal_vecs.append(normal_vecs_geom)
+        rot_mats_contact.append(rot_mats_contact_geom)
+        face_vertices.append(face_vertices_select)
+    contact_poss = jnp.concatenate(contact_poss, axis=0)
+    normal_vecs = jnp.concatenate(normal_vecs, axis=0)
+    rot_mats_contact = jnp.concatenate(rot_mats_contact, axis=0)
+    face_vertices = jnp.concatenate(face_vertices, axis=0)
+    mesh_ids = jnp.array(mesh_ids)
+    geom_ids = jnp.array(geom_ids)
+    return mesh_ids, geom_ids, contact_poss, normal_vecs, rot_mats_contact, face_vertices, total_target_body_names
+
+def merge_wrenches(model, equi_ext_wrenches, total_target_body_names):
+    body_ids = np.array([model.body(target_body_name).id for target_body_name in total_target_body_names])
+    body_ids2_wrenches = {}
+    body_ids_set = set(body_ids.tolist())
+    for body_id in body_ids_set:
+        body_ids2_wrenches[body_id] = []
+    
+    for wrench, body_id in zip(equi_ext_wrenches, body_ids):
+        body_ids2_wrenches[body_id].append(wrench)
+    
+    body_ids = np.array(list(body_ids2_wrenches.keys()))
+    body_names = np.array([model.body(body_id).name for body_id in body_ids])
+    equi_ext_wrenches = jnp.array([jnp.sum(jnp.array(body_ids2_wrenches[body_id]), axis=0) for body_id in body_ids])
+    return equi_ext_wrenches, body_ids, body_names
+
 def main() -> None:
     assert mujoco.__version__ >= "3.1.0", "Please upgrade to mujoco 3.1.0 or later."
 
@@ -88,19 +130,23 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    target_body_name = "link6"
+    target_body_names = ["link6"]
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
-    import time
-    start_time = time.time()
+    # import time
+    # start_time = time.time()
     randomseed = np.random.randint(0, 10000)
     randomseed = 0
-    n_contacts = 1
-    mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
-    mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contacts, key=jax.random.PRNGKey(randomseed))
-    print("Time taken to sample mesh point:", time.time() - start_time)
+    n_contacts_per_body = [1 for _ in target_body_names]
+    n_contacts = sum(n_contacts_per_body)
+    # mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
+    # mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contacts, key=jax.random.PRNGKey(randomseed))
+    # print("Time taken to sample mesh point:", time.time() - start_time)
+    taget_mesh_ids, target_geom_ids, target_contact_poss_geom, target_normal_vecs_geom, \
+    target_rot_mats_contact_geom, target_face_vertices_select, total_target_body_names = \
+    sample_contacts(mesh_sampler, target_body_names, n_contacts_per_body, key=jax.random.PRNGKey(randomseed))
 
     # Fixed value for testing
-    contact_pos_target = contact_poss_geom[0]
+    contact_pos_target = target_contact_poss_geom
     ext_f_norm = 20.0
     applied_times = 0
     applied_ext_f = True
@@ -122,7 +168,7 @@ def main() -> None:
     
     # Enable site frame visualization.
     viewer.vopt.frame = mujoco.mjtFrame.mjFRAME_SITE
-    site_names = [f"{target_body_name}_dummy_site{i}" for i in range(1, 2)]
+    site_names = [f"{target_body_name}_dummy_site1" for target_body_name in target_body_names]
     for site_name in site_names:
         site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
         if site_id > -1:
@@ -135,15 +181,17 @@ def main() -> None:
     
     # Prepare the jax model and contact particle filter
     if use_mjx:
-        mjx_data = warmup_jit(mjx_model, mjx_data, model, data, target_body_name=target_body_name)
+        mjx_data = warmup_jit(mjx_model, mjx_data, model, data, target_body_names=target_body_names)
         data = mjx.get_data(model, mjx_data)
         # TODO: retrieve the site_ids after initialized the particles, the site ids are aligned with each particle
         # and use search_body_names instead of target_body_name
-        search_body_names = [target_body_name, "link5"]
-        cpf = ContactParticleFilter(model=model, data=data, n_particles=100, robot_name="kuka_iiwa_14",
+        search_body_names = target_body_names
+        search_body_names.append("link5") # Add a body for the search space of the contact particle filter
+        n_particles = 100
+        n_particles_per_body = n_particles // n_contacts
+        cpf = ContactParticleFilter(model=model, data=data, n_particles=n_particles_per_body, robot_name="kuka_iiwa_14",
                                     search_body_names=search_body_names, ext_f_norm=ext_f_norm,
-                                    importance_distribution_noise=0.02, measurement_noise=0.02, 
-                                    n_contacts=n_contacts)
+                                    importance_distribution_noise=0.02, measurement_noise=0.02)
         cpf.initialize_particles()
     
         key = jax.random.PRNGKey(0)
@@ -154,10 +202,10 @@ def main() -> None:
         update_gt_ext_tau = False
         mu = 200.0
         polyhedral_num = 4
-        qp_solver = QPSolver(n_joints=model.nv, n_contacts=1, mu=mu, polyhedral_num=polyhedral_num)
-        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=1, n_qps=cpf.n_particles, mu=mu,
+        # qp_solver = QPSolver(n_joints=model.nv, n_contacts=n_contacts, mu=mu, polyhedral_num=polyhedral_num)
+        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=n_contacts, n_qps=cpf.n_particles, mu=mu,
                                         polyhedral_num=polyhedral_num)
-        qp_nonlinear_solver = QPNonlinearSolver(n_joints=model.nv, n_contacts=1, mu=mu)
+        # qp_nonlinear_solver = QPNonlinearSolver(n_joints=model.nv, n_contacts=n_contacts, mu=mu)
     
     carry = {"carry_particles": {}, "carry_mat_arrows": {}, "carry_normal_arrows": {}}
     
@@ -168,20 +216,21 @@ def main() -> None:
         reset_scene(scene, ngeom_init)
             
         # Retrieve the geometry position and rotation matrix.
-        geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
-        rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)        # shape (3,3)
+        geom_poss_world = data.geom_xpos[target_geom_ids]        # shape (3,)
+        rot_mats_geom_world = data.geom_xmat[target_geom_ids].reshape(-1, 3, 3)        # shape (3,3)
         
-        carry["carry_mat_arrows"]["geom_origin_pos_world"] = geom_pos_world
-        carry["carry_mat_arrows"]["geom_origin_mat_world"] = rot_mat_geom_world
-        carry["carry_mat_arrows"]["arrows_pos_local"] = contact_poss_geom
-        carry["carry_mat_arrows"]["arrows_rot_mat_local"] = rot_mats_contact_geom
+        carry["carry_mat_arrows"]["geom_origin_poss_world"] = geom_poss_world
+        carry["carry_mat_arrows"]["geom_origin_mats_world"] = rot_mats_geom_world
+        carry["carry_mat_arrows"]["arrows_pos_local"] = target_contact_poss_geom
+        carry["carry_mat_arrows"]["arrows_rot_mat_local"] = target_rot_mats_contact_geom
         
         # Compute the equivalent external forces to apply on the body.
         ## Add a function that computes the equivalent external forces with jax.numpy
         mesh_sampler.update_model_data(model, data)
         equi_ext_f_poss, equi_ext_wrenches, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts = \
-        mesh_sampler.compute_equivalent_wrenches(contact_poss_geom, rot_mats_contact_geom, normal_vecs_geom,
-                                                 target_body_name, geom_id, ext_f_norm)
+        mesh_sampler.compute_equivalent_wrenches_multibody(target_contact_poss_geom, target_rot_mats_contact_geom, 
+                                                           target_normal_vecs_geom, total_target_body_names,
+                                                           target_geom_ids, ext_f_norm)
 
         # Visualize the equivalent external forces
         equi_ext_fs = np.array(equi_ext_wrenches)[:, :3]
@@ -196,18 +245,20 @@ def main() -> None:
         carry["carry_normal_arrows"]["arrows_vec_world"] = equi_ext_fs
 
         # Apply the wrench profile to the specified body names.
+        equi_ext_wrenches, body_ids, body_names = merge_wrenches(model, equi_ext_wrenches, total_target_body_names)
         if not use_mjx:
             if applied_ext_f:
                 if applied_predefined_wrench:
                     if applied_times < 10000:
                         wrench_applier.apply_predefined_wrench()
                 else:
-                    wrench_applier.apply_wrench(equi_ext_wrenches[0], target_body_name)
+                    wrench_applier.apply_wrenches(equi_ext_wrenches, body_names) # TODO: now it's a list, need to update the
+                                                                                        # apply_wrench interface
                 applied_times += 1
         else:
             if applied_ext_f:
-                body_id = model.body(target_body_name).id
-                mjx_data = apply_wrench_mjx(mjx_data, equi_ext_wrenches[0], body_id)
+                # merge the wrenches into a single wrench for each body, group by body id
+                mjx_data = apply_wrenches_mjx(mjx_data, equi_ext_wrenches, body_ids)
         
         # Compute the Coriolis matrix with pinocchio TODO: implement the computation for Coriolis matrix with only mujoco
         C_pino = pino.computeCoriolisMatrix(pino_model, pino_data, data.qpos, data.qvel)

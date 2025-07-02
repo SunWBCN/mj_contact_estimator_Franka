@@ -137,11 +137,10 @@ def compute_site_ids(model, particles_link_names, search_body_names):
         particles_site_ids.append(particle_site_id)
     particles_site_ids = jnp.array(particles_site_ids)
     return particles_site_ids
-    
 
 class ContactParticleFilter:
     def __init__(self, model, data, n_particles=1000, robot_name="kuka_iiwa_14", search_body_names=["link7"], ext_f_norm=5.0,
-                 importance_distribution_noise=0.01, measurement_noise=0.01, n_contacts=1):
+                 importance_distribution_noise=0.01, measurement_noise=0.01):
         self.n_particles = n_particles
         self.sampler = mesh_sampler.MeshSampler(model, data, False, robot_name)
         self.search_body_names = search_body_names
@@ -150,8 +149,6 @@ class ContactParticleFilter:
         self.measurement_noise = measurement_noise
         self.model = model
         self.data = data
-        self.n_particles_per_set = n_particles // n_contacts
-        self.particle_sets = []
     
     def initialize_particles(self, search_body_names=None):
         randomseed = np.random.randint(0, 1000000)
@@ -182,9 +179,6 @@ class ContactParticleFilter:
         
         # update the indexes of the particles
         self.particles_indexes = nearest_contact_indexes
-    
-    def manage_particle_sets(self):
-        pass
 
     def update_weights(self, epsilons):
         # Epsilon is the loss of a convex QP, use to compute the likelihood of the particles as weights

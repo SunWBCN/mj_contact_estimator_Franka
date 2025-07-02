@@ -672,6 +672,72 @@ class MeshSampler:
         face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal(mesh_name, num_samples)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
         
+    def compute_equivalent_wrenches_multibody(self, contact_poss_geom: list, rots_mat_contact_geom: list, normal_vecs_geom: list, sample_body_names: list, geom_ids: list, ext_f_norm: float):
+        model = self.model
+        data = self.data
+        equi_ext_fs = []
+        equi_ext_f_poss = []
+        equi_ext_wrenchs = []
+        rot_mats_contact_world = []
+        contact_poss_world = []
+        contact_poss_com = []
+        rot_mats_contact_com = []
+        jacobian_contacts = []
+        jacobian_bodies = []
+        ext_wrenches = []
+        for i in range(len(rots_mat_contact_geom)):
+            geom_id = geom_ids[i]
+            sample_body_name = sample_body_names[i]
+            geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
+            rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)    
+            com_pos_world = data.xpos[model.body(sample_body_name).id]
+            rot_mat_com_world = data.xmat[model.body(sample_body_name).id].reshape(3, 3)
+            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site1") # TODO: change the hardcode case to fit the number of contact points
+            rot_mat_contact_geom = rots_mat_contact_geom[i]
+            rot_mat_contact_world = rot_mat_geom_world @ rot_mat_contact_geom
+            contact_pos_geom = contact_poss_geom[i]
+            contact_pos_world = geom_pos_world + rot_mat_geom_world @ contact_pos_geom
+            contact_pos_com = rot_mat_com_world.T @ (contact_pos_world - com_pos_world)
+            rot_mat_contact_com = rot_mat_com_world.T @ rot_mat_contact_world
+
+            # Retrieve the normal vector
+            normal_vec_geom = normal_vecs_geom[i]
+            normal_vec_world = rot_mat_geom_world @ normal_vec_geom
+
+            # Applied force
+            ext_f_geom = normal_vec_geom * ext_f_norm
+            ext_f = normal_vec_world * ext_f_norm
+            ext_wrench = np.concatenate((ext_f, np.zeros(3)))
+            com_to_contact_world = contact_pos_world - com_pos_world
+            equi_ext_wrench = compute_equivalent_wrench(ext_wrench, com_to_contact_world)
+            ext_wrenches.append(ext_wrench)
+            
+            # Append the data.
+            equi_ext_fs.append(ext_f)
+            equi_ext_f_poss.append(com_pos_world)
+            equi_ext_wrenchs.append(equi_ext_wrench)
+            rot_mats_contact_world.append(rot_mat_contact_world)
+            contact_poss_world.append(contact_pos_world)
+            contact_poss_com.append(contact_pos_com)
+            rot_mats_contact_com.append(rot_mat_contact_com)
+            
+            # Update the site position and quaternion for computing jacobian
+            model.site_pos[site_id] = contact_pos_com
+            rot = R.from_matrix(rot_mat_contact_com)
+            quat_mujoco = rot.as_quat(scalar_first=True)
+            model.site_quat[site_id] = quat_mujoco
+            mujoco.mj_forward(model, data) # update kinematics
+            jac_site_contact = np.zeros((6, model.nv))
+            mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
+            jacobian_contacts.append(jac_site_contact)    
+            jac_body = np.zeros((6, model.nv))
+            mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
+            jacobian_bodies.append(jac_body)
+            # print(jac_site_contact.T @ ext_wrench - jac_body.T @ equi_ext_wrench) # Check the euqivalent wrench is correct or not
+            # print(f"Iter {i}: ========================")
+            
+        return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
+        
     def compute_equivalent_wrenches(self, contact_poss_geom: list, rots_mat_contact_geom: list, normal_vecs_geom: list, sample_body_name: str, geom_id: int, ext_f_norm: float):
         model = self.model
         data = self.data

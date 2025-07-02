@@ -391,8 +391,8 @@ class MujocoViewer(Callbacks):
             return np.flipud(img)
 
     def visualize_mat_arrows(self, carry_mat_arrows):
-        geom_origin_pos_world = carry_mat_arrows["geom_origin_pos_world"]
-        geom_origin_mat_world = carry_mat_arrows["geom_origin_mat_world"]
+        geom_origin_poss_world = carry_mat_arrows["geom_origin_poss_world"]
+        geom_origin_mats_world = carry_mat_arrows["geom_origin_mats_world"]
         arrows_pos_local = carry_mat_arrows["arrows_pos_local"]
         arrows_rot_mat_local = carry_mat_arrows["arrows_rot_mat_local"]
         arrow_length = carry_mat_arrows.get("arrow_length", 0.4)
@@ -419,6 +419,8 @@ class MujocoViewer(Callbacks):
         for i in range(len(arrows_pos_local)):
             face_center_local = arrows_pos_local[i]
             arrow_rot_mat_local = arrows_rot_mat_local[i]
+            geom_origin_pos_world = geom_origin_poss_world[i]
+            geom_origin_mat_world = geom_origin_mats_world[i]
             update_scene(self.scn, geom_origin_pos_world, geom_origin_mat_world, face_center_local, arrow_rot_mat_local)
 
     def visualize_normal_arrow(self, carry_normal_arrow):
