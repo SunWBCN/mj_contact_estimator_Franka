@@ -150,63 +150,37 @@ class ContactParticleFilter:
         self.measurement_noise = measurement_noise
         self.model = model
         self.data = data
-        self.initialize_particles(contact_particle_gt)
+        self.particle_sets = []
     
-    def initialize_particles(self, contact_particle_gt=None, search_body_names=None):
+    def initialize_particles(self, search_body_names=None):
         randomseed = np.random.randint(0, 1000000)
         key = jax.random.PRNGKey(randomseed)
-        self.sampler.update_sampling_space_jax(self.search_body_names) # Don't forget to update the sampling space
         
-        if search_body_names is None:
-            search_body_names = self.search_body_names
-        
-        mesh_ids, geom_ids, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select, \
-        particles_link_names = \
-        self.sampler.sample_bodies_pos_normal_jax(body_names=search_body_names, num_samples=self.n_particles, key=key)
-        
-        self.particles = contact_poss_geom
-        self.forces_normal = normal_vecs_geom * self.ext_f_norm
-        self.rots_mat_contact = rots_mat_contact_geom
-        self.face_vertices_select = face_vertices_select
-        self.geom_ids = geom_ids
-        self.weight = jnp.ones(self.n_particles) / self.n_particles
-        
-        self.particles_link_names = particles_link_names
-        self.particles_site_ids = compute_site_ids(self.model, particles_link_names, search_body_names)
-        self.particles_body_ids = jnp.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in particles_link_names])
-        
-        if contact_particle_gt is not None:
-            contact_pos_geom_gt, normal_vec_geom_gt, rot_mat_contact_gt, face_vertice_select_gt = contact_particle_gt
-            self.particles = self.particles.at[0].set(jnp.array(contact_pos_geom_gt))
-            self.forces_normal = self.forces_normal.at[0].set(jnp.array(normal_vec_geom_gt * self.ext_f_norm))
-            self.rots_mat_contact = self.rots_mat_contact.at[0].set(jnp.array(rot_mat_contact_gt))
-            self.face_vertices_select = self.face_vertices_select.at[0].set(jnp.array(face_vertice_select_gt))
-            
-        self.particle_center = jnp.mean(self.particles, axis=0)
-        return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_ids, \
-               self.particles_site_ids
+        self.sampler.update_sampling_space_global(self.search_body_names)
+        particles_indexes = self.sampler.sample_indexes_global(self.search_body_names, self.n_particles, key=key)
+        self.particles_indexes = particles_indexes
         
     def predict_particles(self, key, search_body_names=None):
         if search_body_names is not None:
-            self.sampler.update_sampling_space_jax(search_body_names)
+            # self.sampler.update_sampling_space_jax(search_body_names)
+            # self.search_body_names = search_body_names
+            self.sampler.update_sampling_space_global(search_body_names)
             self.search_body_names = search_body_names
         
-        perturbed_particles = self.particles + jax.random.normal(key=key, shape=self.particles.shape) * self.importance_distribution_noise
-        # TODO: update the computed neartest position approach for multiple links and return the geom_ids and particles_site_ids
-        nearest_positions, normals, rot_mats, face_vertices_select, geom_ids, particles_link_names \
-        = self.sampler.compute_nearest_positions_bodies_jax(perturbed_particles, self.search_body_names)
-        self.particles = nearest_positions
-        self.forces_normal = normals * self.ext_f_norm
-        self.rots_mat_contact = rot_mats
-        self.face_vertices_select = face_vertices_select
+        # TODO: new code base on global indexing
+        particles = self.get_particles_positions()  # Get the current particles positions
         
-        # TODO : update the geom_ids and particles_site_ids
-        self.geom_ids = geom_ids
-        self.particles_site_ids = compute_site_ids(self.model, particles_link_names, self.search_body_names)        
-        self.particles_link_names = particles_link_names
+        # perturb the particles
+        perturbed_particles = particles + jax.random.normal(key=key, shape=particles.shape) * self.importance_distribution_noise
         
-        self.particles_body_ids = jnp.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in particles_link_names])
-        return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_ids
+        # find the nearest positions indexes
+        nearest_contact_indexes = self.sampler.find_nearest_indexes(perturbed_particles, self.search_body_names)
+        
+        # update the indexes of the particles
+        self.particles_indexes = nearest_contact_indexes
+    
+    def manage_particle_sets(self):
+        pass
 
     def update_weights(self, epsilons):
         # Epsilon is the loss of a convex QP, use to compute the likelihood of the particles as weights
@@ -217,22 +191,41 @@ class ContactParticleFilter:
         
     def resample_particles(self, key, method='multinomial'):
         if method == "multinomial":
-            # Resample the particles based on the weights
-            indices = jax.random.choice(key, jnp.arange(self.n_particles), shape=(self.n_particles, ), p=self.weight)
-            self.particles = slice_with_indices(self.particles, indices)
-            self.forces_normal = slice_with_indices(self.forces_normal, indices)
-            self.rots_mat_contact = slice_with_indices(self.rots_mat_contact, indices)
-            self.face_vertices_select = slice_with_indices(self.face_vertices_select, indices)
-            # TODO: update the geom_ids and particles_site_ids
-            self.geom_ids = slice_with_indices(self.geom_ids, indices)
-            self.particles_site_ids = slice_with_indices(self.particles_site_ids, indices)
-            self.particles_body_ids = slice_with_indices(self.particles_body_ids, indices)
+            indices = jax.random.choice(key, self.particles_indexes, shape=(self.n_particles, ), p=self.weight)
+            self.particles_indexes = indices
             self.weight = jnp.ones(self.n_particles) / self.n_particles
-            self.particle_center = jnp.mean(self.particles, axis=0)
-            self.particles_link_names = np.array(self.particles_link_names)[indices]
         else:
             raise ValueError("Unknown resampling method: {}".format(method))
-        return self.particles, self.forces_normal, self.rots_mat_contact, self.face_vertices_select, self.geom_ids
+
+    def get_particles_data(self):
+        particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names = \
+        self.sampler.get_data(self.particles_indexes)
+        particles_site_ids = compute_site_ids(self.model, particles_link_names, self.search_body_names)   
+        particles_body_ids = jnp.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in particles_link_names])
+        forces_normal = forces_normal * self.ext_f_norm  # Scale the forces by the external force norm
+        return particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names, \
+               particles_site_ids, particles_body_ids
+
+    def get_particles_positions(self):
+        return self.get_particles_data()[0]
+    
+    def get_geom_ids(self):
+        return self.get_particles_data()[4]
+
+    def get_particles_link_names(self):
+        return self.get_particles_data()[5]
+    
+    def get_particles_body_ids(self):
+        return self.get_particles_data()[7]
+    
+    def get_particles_site_ids(self):
+        return self.get_particles_data()[6]
+    
+    def get_particles_rotations(self):
+        return self.get_particles_data()[2]
+    
+    def get_particles_forces(self):
+        return self.get_particles_data()[1]
 
 def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=20, particle_history=[], 
              average_errors=[], data_log=None, qp_loss=True, qp_solver=None, polyhedral_num=4):
@@ -241,16 +234,19 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=2
     for i in range(iters):
         key, subkey = jax.random.split(key)
         # TODO: perturbed the particles and return geom_ids, site_ids of the particles
-        particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids = cpf.predict_particles(subkey) # The perturbations are not based on geodesic distances, so could jump from link7 to link6
+        cpf.predict_particles(subkey) # The perturbations are not based on geodesic distances, so could jump from link7 to link6
+        
+        particles, forces_normal, rots_mat_contact, face_vertices_select, geom_ids, particles_link_names, \
+        particles_site_ids, particles_body_ids = cpf.get_particles_data()
         
         geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-        = get_batch_contact_pos_rot(mjx_data, cpf.geom_ids, cpf.particles_body_ids)
+        = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
         
         # TODO: change the computation to use batch rot_mat_geom_world, geom_pos_pos_world, com_pos_world etc.
         jacobians, contact_poss_coms, rot_mats_contact_com, quats = \
-        compute_batch_site_jac_pipeline(rot_mats_contact_geom, particles, rot_mats_geom_world,
+        compute_batch_site_jac_pipeline(rots_mat_contact, particles, rot_mats_geom_world,
                                         rot_mats_com_world, geom_poss_world, com_poss_world, 
-                                        mjx_model, mjx_data, qpos, cpf.particles_site_ids)
+                                        mjx_model, mjx_data, qpos, particles_site_ids)
         
         # wait till the jacobian is computed
         jax.block_until_ready(jacobians)
@@ -277,24 +273,19 @@ def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=2
             else:
                 params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau),
                                                                  np.array(friction_cone_basises),)
-        # # Print the corresponding errors to each link
-        # link7_index = np.where(np.array(cpf.particles_link_names) == "link7")[0]
-        # link6_index = np.where(np.array(cpf.particles_link_names) == "link6")[0]
-        # link7_errors = errors[link7_index]
-        # link6_errors = errors[link6_index]
-        # print("Sorted Errors for link7:", jnp.sort(link7_errors))
-        # print("Sorted Errors for link6:", jnp.sort(link6_errors))
         
         cpf.update_weights(errors)
         key, subkey = jax.random.split(key)        
-        particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids \
-        = cpf.resample_particles(subkey, method='multinomial')
+        cpf.resample_particles(subkey, method='multinomial')
         
+        particles = cpf.get_particles_positions()  # Get the current particles positions
         particle_history.append(particles)
         average_errors.append(jnp.mean(errors))
 
+    geom_ids = cpf.get_geom_ids()
+    particles_body_ids = cpf.get_particles_body_ids()
     geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-    = get_batch_contact_pos_rot(mjx_data, cpf.geom_ids, cpf.particles_body_ids)
+    = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
     return geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world
     
 def visualize_particles(fig, axes, particle_history, average_errors, contact_pos_target):

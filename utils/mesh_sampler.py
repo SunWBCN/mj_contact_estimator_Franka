@@ -90,6 +90,21 @@ def assign_indices_to_names(lengths: jnp.ndarray, indices: jnp.ndarray, names: L
 feasible_region_idxes = {"link_7": [[988, -1]], "link_6_orange": [[0, -1]], "link_5": [[800, 1800], [2000, -1]],
                          "link_4_orange": [[0, -1]], "link_3": [[675, 5979], [6236, -1]], "link_2_orange": [[0, -1]],
                          "link_1": [[400, 1000], [1000, 8120], [8451, -1]]}
+mesh_names_2_body_names = {
+    "link_7": "link7",
+    "link_6_orange": "link6",
+    "link_6_grey": "link6",
+    "link_5": "link5",
+    "link_4_orange": "link4",
+    "link_4_grey": "link4",
+    "link_3": "link3",
+    "link_2_orange": "link2",
+    "link_2_grey": "link2",
+    "link_1": "link1"
+}   
+_link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
+_mesh_names_ = ["link_1", "link_2_orange", "link_3", "link_4_orange", "link_4_grey", "link_5",
+                "link_6_orange", "link_7"]
 
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
@@ -116,7 +131,20 @@ class MeshSampler:
         print("Number of meshes:", self.model.nmesh)
         print("Number of vertices:", len(self.model.mesh_vertadr))
 
+        # TODO: prepare the data with global indexing instead of local indexing
         self.data_dict = {}
+        
+        global_geom_ids = []
+        global_normal_list = []
+        global_face_center_list = []
+        global_face_vertices_list = []
+        global_rot_mat_list = []
+        global_vis_face_list = []
+        globalid2linkname = []
+        globalid2geomname = []
+        globalid2localid = []
+        global_num_samples = []
+        
         for i in range(self.model.nmesh):
             geom_ids = []
             normal_list = []
@@ -194,6 +222,64 @@ class MeshSampler:
             data_dict_mesh_i["face_vertices_list_jax"] = jnp.array(face_vertices_list)
             self.data_dict[mesh_name] = data_dict_mesh_i
             
+            if mesh_name in feasible_region_idxes.keys():
+                global_geom_ids.extend(geom_ids * len(face_center_list))
+                global_normal_list.extend(normal_list)
+                global_face_center_list.extend(face_center_list)
+                global_face_vertices_list.extend(face_vertices_list)
+                global_rot_mat_list.extend(rot_mat_list)
+                global_vis_face_list.extend(vis_face_list)
+                
+                linkname = mesh_names_2_body_names[mesh_name]
+                globalid2linkname.extend([linkname] * len(face_center_list))
+                globalid2geomname.extend(geom_names * len(face_center_list))
+                globalid2localid.extend(list(range(len(face_center_list))))
+
+                global_num_samples.append(len(face_center_list))
+        # Convert lists to numpy arrays
+        global_geom_ids = np.array(global_geom_ids)
+        global_normal_list = np.array(global_normal_list)
+        global_face_center_list = np.array(global_face_center_list)
+        global_face_vertices_list = np.array(global_face_vertices_list)
+        global_rot_mat_list = np.array(global_rot_mat_list)
+        global_vis_face_list = np.array(global_vis_face_list)
+        
+        # Convert numpy arrays to JAX arrays
+        global_geom_ids_jax = jnp.array(global_geom_ids)
+        global_normal_list_jax = jnp.array(global_normal_list)
+        global_face_center_list_jax = jnp.array(global_face_center_list)
+        global_face_vertices_list_jax = jnp.array(global_face_vertices_list)
+        global_rot_mat_list_jax = jnp.array(global_rot_mat_list)
+        global_vis_face_list_jax = jnp.array(global_vis_face_list)
+        
+        globalid2linkname = np.array(globalid2linkname)
+        globalid2geomname = np.array(globalid2geomname)
+        globalid2localid = jnp.array(globalid2localid)
+        
+        global_num_samples = jnp.array(global_num_samples)
+        global_starting_indices = jnp.cumsum(global_num_samples)[:-1]
+        global_starting_indices = jnp.concatenate((jnp.array([0]), global_starting_indices))
+        global_start_end_indices = jnp.stack((global_starting_indices, jnp.cumsum(global_num_samples)), axis=1)
+        
+        # Add global arrays to the data_dict
+        self.data_dict["global_geom_ids"] = global_geom_ids
+        self.data_dict["global_normal_list"] = global_normal_list
+        self.data_dict["global_face_center_list"] = global_face_center_list
+        self.data_dict["global_face_vertices_list"] = global_face_vertices_list
+        self.data_dict["global_rot_mat_list"] = global_rot_mat_list
+        self.data_dict["global_vis_face_list"] = global_vis_face_list
+        self.data_dict["global_geom_ids_jax"] = global_geom_ids_jax
+        self.data_dict["global_normal_list_jax"] = global_normal_list_jax
+        self.data_dict["global_face_center_list_jax"] = global_face_center_list_jax
+        self.data_dict["global_face_vertices_list_jax"] = global_face_vertices_list_jax
+        self.data_dict["global_rot_mat_list_jax"] = global_rot_mat_list_jax
+        self.data_dict["global_vis_face_list_jax"] = global_vis_face_list_jax
+        self.data_dict["globalid2linkname"] = globalid2linkname
+        self.data_dict["globalid2geomname"] = globalid2geomname
+        self.data_dict["globalid2localid"] = globalid2localid
+        self.data_dict["global_num_samples"] = global_num_samples
+        self.data_dict["global_start_end_indices"] = global_start_end_indices
+            
         # Generate a mapping from body names to mesh and geom names
         body_names = [self.model.body(i).name for i in range(self.model.nbody) if "link" in self.model.body(i).name]
         body_names_mapping = {}
@@ -229,6 +315,19 @@ class MeshSampler:
         file_name = f"{xml_path}/mesh_data_dict.npy"
         np.save(file_name, self.data_dict)
         print(f"Mesh data saved to {file_name}")
+        
+    # TODO: return link name and local index for faces    
+    def global2local_id(self, global_ids: jnp.ndarray):
+        mapping = self.data_dict["globalid2localid"]
+        return slice_with_indices(mapping, global_ids)
+
+    def global2link_name(self, global_ids: jnp.ndarray):
+        mapping = self.data_dict["globalid2linkname"]
+        return mapping[global_ids]
+    
+    def global2geom_name(self, global_ids: jnp.ndarray):
+        mapping = self.data_dict["globalid2geomname"]
+        return mapping[global_ids]
             
     def visualize_mesh(self, mesh_id: int, faces_start: int = 10, faces_end: int = -1):
         v_start = self.model.mesh_vertadr[mesh_id]
@@ -447,6 +546,50 @@ class MeshSampler:
             "sample_nums": jnp.array(sample_nums),
         }
 
+    def update_sampling_space_global(self, body_names: list):
+        """
+        Update the sampling space with the global indices of the face centers
+        """
+        body_ids = [_link_names_.index(body_name) for body_name in body_names]
+        feasible_idxes = []
+        for body_id in body_ids:
+            start = self.data_dict["global_start_end_indices"][body_id][0]
+            end = self.data_dict["global_start_end_indices"][body_id][1]
+            feasible_idxes.extend(jnp.arange(start, end).tolist())
+        feasible_idxes = jnp.array(feasible_idxes)
+        self.feasible_idxes = feasible_idxes
+
+    def sample_indexes_global(self, sample_body_names: None, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        """
+        Sample indices from the global search space.
+        
+        Args:
+            sample_body_names: List of body names to sample from.
+            num_samples: Number of samples to draw.
+        
+        Returns:
+            idxs: Sampled indices.
+        """
+        if sample_body_names is not None:
+            feasible_idxes = self.feasible_idxes
+        else:
+            # if no specific body names are provided, sample from the entire search space
+            feasible_idxes = jnp.arange(self.data_dict["global_face_center_list_jax"].shape[0])
+        idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
+        return idxes
+    
+    def get_data(self, global_idxs: jnp.ndarray):
+        """
+        Get the data corresponding to the global indices.
+        """
+        face_center_list = slice_with_indices(self.data_dict["global_face_center_list_jax"], global_idxs)
+        normal_list = slice_with_indices(self.data_dict["global_normal_list_jax"], global_idxs)
+        rot_mat_list = slice_with_indices(self.data_dict["global_rot_mat_list_jax"], global_idxs)
+        face_vertices_list = slice_with_indices(self.data_dict["global_face_vertices_list_jax"], global_idxs)
+        geom_ids = slice_with_indices(self.data_dict["global_geom_ids"], global_idxs)
+        link_names = self.global2link_name(global_idxs)
+        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names
+        
     def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
         Sample a position and normal vector from the mesh using JAX.
@@ -498,6 +641,19 @@ class MeshSampler:
         face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names, mesh_ids, geom_ids \
         = self.sample_poss_normal_jax(mesh_names, num_samples, key)
         return mesh_ids, geom_ids, face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names
+
+    def sample_indexes(self, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        """
+        Sample indices from the search space.
+        
+        Args:
+            num_samples: Number of samples to draw.
+        
+        Returns:
+            idxs: Sampled indices.
+        """
+        face_center_list = self.data_dict["search_space"]["face_center_list"]
+        return jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
 
     def sample_body_pos_normal(self, body_name: str, num_samples: int = 3):
         """
@@ -660,6 +816,28 @@ class MeshSampler:
         randomized_link_names = assign_indices_to_names(sample_nums, indices, body_names)
         randomized_geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
         return nearest_positions, normals, rot_mats, faces_vertices_select, randomized_geom_ids, randomized_link_names
+        
+    def find_nearest_indexes(self, positions: jnp.ndarray, body_names: list):
+        """
+        Find the nearest indexes of the positions in the search space.
+        
+        Args:
+            positions: Positions to find the nearest indexes for.
+            body_names: List of body names to sample from.
+        
+        Returns:
+            nearest_indexes: Nearest indexes of the positions in the search space.
+        """
+        feasible_idxes = self.feasible_idxes
+        if body_names is not None:
+            faces_search_space = slice_with_indices(self.data_dict["global_face_center_list_jax"], feasible_idxes)
+        else:
+            faces_search_space = self.data_dict["global_face_center_list_jax"]
+        indices = batchwise_nearest_jax(positions, faces_search_space) # note that here the indices are relative to the search space
+        
+        # convert the indices to global indices
+        nearest_indexes = feasible_idxes[indices]
+        return nearest_indexes
         
 if __name__ == "__main__":
     # Example usage

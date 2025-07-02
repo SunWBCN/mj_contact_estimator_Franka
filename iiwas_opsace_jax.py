@@ -88,12 +88,12 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    target_body_name = "link5"
+    target_body_name = "link6"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     import time
     start_time = time.time()
     randomseed = np.random.randint(0, 10000)
-    # randomseed = 0
+    randomseed = 0
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=1, key=jax.random.PRNGKey(randomseed))
     print("Time taken to sample mesh point:", time.time() - start_time)
@@ -140,10 +140,10 @@ def main() -> None:
         data = mjx.get_data(model, mjx_data)
         # TODO: retrieve the site_ids after initialized the particles, the site ids are aligned with each particle
         # and use search_body_names instead of target_body_name
-        search_body_names = [target_body_name, "link6"]
+        search_body_names = [target_body_name, "link5"]
         cpf = ContactParticleFilter(model=model, data=data, n_particles=100, robot_name="kuka_iiwa_14",
                                     search_body_names=search_body_names, ext_f_norm=ext_f_norm,
-                                    importance_distribution_noise=0.01, measurement_noise=0.01, 
+                                    importance_distribution_noise=0.02, measurement_noise=0.02, 
                                     contact_particle_gt=contact_particle_gt)
         cpf.initialize_particles()
     
@@ -251,15 +251,17 @@ def main() -> None:
                 = cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history, average_errors=average_errors, iters=10,
                            data_log=data_log, batch_qp_solver=batch_qp_solver, polyhedral_num=polyhedral_num)            
             else:
+                geom_ids = cpf.get_geom_ids()
+                particles_body_ids = cpf.get_particles_body_ids()
                 geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-                = get_batch_contact_pos_rot(mjx_data, cpf.geom_ids, cpf.particles_body_ids)
+                = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
                 
             particles_geom_pos_world = geom_poss_world
             particles_rot_mat_geom_world = rot_mats_geom_world
             carry["carry_particles"]["geom_origin_poss_world"] = particles_geom_pos_world # TODO: need to update in a batch manner
             carry["carry_particles"]["geom_origin_mats_world"] = particles_rot_mat_geom_world # TODO: need to update in a batch manner
-            carry["carry_particles"]["particles_pos_geom"] = cpf.particles
-            carry["carry_particles"]["particles_mat_geom"] = cpf.rots_mat_contact
+            carry["carry_particles"]["particles_pos_geom"] = cpf.get_particles_positions()
+            carry["carry_particles"]["particles_mat_geom"] = cpf.get_particles_rotations()
                     
         # # Compute the inverse dynamics torques.
         # mujoco.mj_forward(model, data)
