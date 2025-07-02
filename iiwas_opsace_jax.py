@@ -94,12 +94,11 @@ def main() -> None:
     start_time = time.time()
     randomseed = np.random.randint(0, 10000)
     randomseed = 0
+    n_contacts = 1
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
-    mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=1, key=jax.random.PRNGKey(randomseed))
+    mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contacts, key=jax.random.PRNGKey(randomseed))
     print("Time taken to sample mesh point:", time.time() - start_time)
-    contact_particle_gt = [contact_poss_geom[0].copy(), normal_vecs_geom[0].copy(),
-                           rot_mats_contact_geom[0].copy(), face_vertices_select[0].copy()]  # For testing the contact particle filter
-    
+
     # Fixed value for testing
     contact_pos_target = contact_poss_geom[0]
     ext_f_norm = 20.0
@@ -127,7 +126,7 @@ def main() -> None:
     for site_name in site_names:
         site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
         if site_id > -1:
-            model.site_size[site_id] * 0.2
+            model.site_size[site_id] * 0.2 # Scale down the site size for better visualization
     
     # Initialize the JAX model and data for mjx.
     mjx_model = mjx.put_model(model)
@@ -144,7 +143,7 @@ def main() -> None:
         cpf = ContactParticleFilter(model=model, data=data, n_particles=100, robot_name="kuka_iiwa_14",
                                     search_body_names=search_body_names, ext_f_norm=ext_f_norm,
                                     importance_distribution_noise=0.02, measurement_noise=0.02, 
-                                    contact_particle_gt=contact_particle_gt)
+                                    n_contacts=n_contacts)
         cpf.initialize_particles()
     
         key = jax.random.PRNGKey(0)

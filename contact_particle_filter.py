@@ -141,7 +141,7 @@ def compute_site_ids(model, particles_link_names, search_body_names):
 
 class ContactParticleFilter:
     def __init__(self, model, data, n_particles=1000, robot_name="kuka_iiwa_14", search_body_names=["link7"], ext_f_norm=5.0,
-                 importance_distribution_noise=0.01, measurement_noise=0.01, contact_particle_gt=None):
+                 importance_distribution_noise=0.01, measurement_noise=0.01, n_contacts=1):
         self.n_particles = n_particles
         self.sampler = mesh_sampler.MeshSampler(model, data, False, robot_name)
         self.search_body_names = search_body_names
@@ -150,15 +150,19 @@ class ContactParticleFilter:
         self.measurement_noise = measurement_noise
         self.model = model
         self.data = data
+        self.n_particles_per_set = n_particles // n_contacts
         self.particle_sets = []
     
     def initialize_particles(self, search_body_names=None):
         randomseed = np.random.randint(0, 1000000)
         key = jax.random.PRNGKey(randomseed)
+        if search_body_names is None:
+            search_body_names = self.search_body_names
         
-        self.sampler.update_sampling_space_global(self.search_body_names)
-        particles_indexes = self.sampler.sample_indexes_global(self.search_body_names, self.n_particles, key=key)
+        self.sampler.update_sampling_space_global(search_body_names)
+        particles_indexes = self.sampler.sample_indexes_global(search_body_names, self.n_particles, key=key)
         self.particles_indexes = particles_indexes
+        self.weight = jnp.ones(self.n_particles) / self.n_particles
         
     def predict_particles(self, key, search_body_names=None):
         if search_body_names is not None:
