@@ -272,8 +272,9 @@ class BatchQPSolver:
         Solve the batch QP problem with updated parameters.
 
         Args:
-            Jc_batch (np.ndarray): Batch of Jacobian matrices of size (3, n_joints, n_qps).
+            Jc_batch (np.ndarray): Batch of Jacobian matrices of size (3*n_contacts, n_joints, n_qps).
             tau_ext_batch (np.ndarray): Batch of external torques of size (n_joints, n_qps).
+            Friction_cone_basises (np.ndaaray): Batch of friction cone basis vectors of size (n_contacts, n_qps, polyhedral_num, 3).
 
         Returns:
             np.ndarray: Estimated contact forces of size (3 * n_contacts, n_qps).
@@ -286,10 +287,10 @@ class BatchQPSolver:
         self.tau_ext.value = tau_ext
         for i in range(self.n_qps):
             for j in range(self.n_contacts):
-                self.friction_cone_basis[i][j].value = Friction_cone_basises[i, :, :]
+                self.friction_cone_basis[i][j].value = Friction_cone_basises[j][i, :, :]
 
         # Solve the problem
-        self.prob.solve(solver=cp.MOSEK, warm_start=True)
+        self.prob.solve(solver=cp.SCS, warm_start=True)
 
         # Compute the residuals
         residuals = [self.Jc[i].value.T @ self.f_c[i].value - self.tau_ext.value for i in range(self.n_qps)]

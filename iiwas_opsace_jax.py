@@ -10,7 +10,8 @@ from utils.geom_visualizer import visualize_normal_arrow, reset_scene, visualize
 from utils.mesh_sampler import MeshSampler
 from utils.robot_transform import *
 from utils.qp_solver import BatchQPSolver, QPSolver, QPNonlinearSolver
-from contact_particle_filter import ContactParticleFilter, cpf_step, visualize_particles, get_batch_contact_pos_rot
+from contact_particle_filter import ContactParticleFilter, cpf_step, visualize_particles, get_batch_contact_pos_rot, \
+                                    get_data_cpf_set, get_cpf_pos, get_cpf_rot
 from mujoco import mjx
 import jax
 from jax import numpy as jnp
@@ -64,6 +65,22 @@ def merge_wrenches(model, equi_ext_wrenches, total_target_body_names):
     body_names = np.array([model.body(body_id).name for body_id in body_ids])
     equi_ext_wrenches = jnp.array([jnp.sum(jnp.array(body_ids2_wrenches[body_id]), axis=0) for body_id in body_ids])
     return equi_ext_wrenches, body_ids, body_names
+
+def compute_sum_of_jacobian_wrench(jacobians, ext_wrenches):
+    """
+    Compute the sum of jac.T @ ext_wrench for a list of Jacobians and external wrenches.
+
+    Args:
+        jacobians (list of jnp.ndarray): List of Jacobians, each of shape (3, 7).
+        ext_wrenches (list of jnp.ndarray): List of external wrenches, each of shape (3,).
+
+    Returns:
+        jnp.ndarray: The sum of jac.T @ ext_wrench.
+    """
+    result = jnp.zeros(jacobians[0].shape[1])  # Initialize with zeros, shape (7,)
+    for jac, ext_wrench in zip(jacobians, ext_wrenches):
+        result += jnp.dot(jac.T, ext_wrench)  # Compute jac.T @ ext_wrench and add to the result
+    return result
 
 def main() -> None:
     assert mujoco.__version__ >= "3.1.0", "Please upgrade to mujoco 3.1.0 or later."
@@ -130,10 +147,8 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    target_body_names = ["link6"]
+    target_body_names = ["link6", "link7"]
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
-    # import time
-    # start_time = time.time()
     randomseed = np.random.randint(0, 10000)
     randomseed = 0
     n_contacts_per_body = [1 for _ in target_body_names]
@@ -186,15 +201,19 @@ def main() -> None:
         # TODO: retrieve the site_ids after initialized the particles, the site ids are aligned with each particle
         # and use search_body_names instead of target_body_name
         search_body_names = target_body_names
-        search_body_names.append("link5") # Add a body for the search space of the contact particle filter
+        # search_body_names.append("link5") # Add a body for the search space of the contact particle filter
         n_particles = 100
         n_particles_per_body = n_particles // n_contacts
-        cpf = ContactParticleFilter(model=model, data=data, n_particles=n_particles_per_body, robot_name="kuka_iiwa_14",
-                                    search_body_names=search_body_names, ext_f_norm=ext_f_norm,
-                                    importance_distribution_noise=0.02, measurement_noise=0.02)
-        cpf.initialize_particles()
+        cpf_set = []
+        for _ in range(n_contacts):
+            cpf = ContactParticleFilter(model=model, data=data, n_particles=n_particles_per_body, robot_name="kuka_iiwa_14",
+                                        search_body_names=search_body_names, ext_f_norm=ext_f_norm,
+                                        importance_distribution_noise=0.02, measurement_noise=0.02)
+            cpf.initialize_particles()
+            cpf_set.append(cpf)
     
-        key = jax.random.PRNGKey(0)
+        key = jax.random.PRNGKey(0) # global key for jax random number generation
+        
         # Particle history for visualization
         particle_history = []
         average_errors = []
@@ -294,24 +313,24 @@ def main() -> None:
             data = mjx.get_data(model, mjx_data)
             jax.block_until_ready(data)
             mujoco.mj_forward(model, data)
-            data_log = {"contact_pos_target": contact_pos_target, "jacobian_contact": jacobian_contacts[0], 
-                        "ext_wrenches": ext_wrenches[0]}
+            data_log = {"contact_pos_target": contact_pos_target, "jacobian_contact": jacobian_contacts, 
+                        "ext_wrenches": ext_wrenches, "target_normal_vecs_geom": target_normal_vecs_geom,
+                        "target_rot_mats_contact_geom": target_rot_mats_contact_geom,
+                        "target_geom_ids": target_geom_ids, "target_body_names": total_target_body_names}
             if update_gt_ext_tau:
                 geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-                = cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history, average_errors=average_errors, iters=10,
-                           data_log=data_log, batch_qp_solver=batch_qp_solver, polyhedral_num=polyhedral_num)            
+                = cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history,
+                           average_errors=average_errors, iters=10, data_log=data_log, batch_qp_solver=batch_qp_solver,
+                           polyhedral_num=polyhedral_num)            
             else:
-                geom_ids = cpf.get_geom_ids()
-                particles_body_ids = cpf.get_particles_body_ids()
-                geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-                = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
-                
+                # TODO: retrieve the positions in particle sets instead of only one particle set 
+                geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world = get_data_cpf_set(cpf_set, mjx_data)
             particles_geom_pos_world = geom_poss_world
             particles_rot_mat_geom_world = rot_mats_geom_world
             carry["carry_particles"]["geom_origin_poss_world"] = particles_geom_pos_world # TODO: need to update in a batch manner
             carry["carry_particles"]["geom_origin_mats_world"] = particles_rot_mat_geom_world # TODO: need to update in a batch manner
-            carry["carry_particles"]["particles_pos_geom"] = cpf.get_particles_positions()
-            carry["carry_particles"]["particles_mat_geom"] = cpf.get_particles_rotations()
+            carry["carry_particles"]["particles_pos_geom"] = get_cpf_pos(cpf_set)
+            carry["carry_particles"]["particles_mat_geom"] = get_cpf_rot(cpf_set)
                     
         # # Compute the inverse dynamics torques.
         # mujoco.mj_forward(model, data)
@@ -324,7 +343,8 @@ def main() -> None:
         
         # Compute the joint space external torques
         # gt_ext_tau_ = tau_total - tau
-        gt_ext_tau = jnp.dot(jacobian_contacts[0].T, ext_wrenches[0])
+        # gt_ext_tau = jnp.dot(jacobian_contacts[0].T, ext_wrenches[0])
+        gt_ext_tau = compute_sum_of_jacobian_wrench(jacobian_contacts, ext_wrenches)
         if not update_gt_ext_tau:
             update_gt_ext_tau = True
         gt_ext_taus.append(gt_ext_tau.copy())

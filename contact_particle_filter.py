@@ -128,6 +128,26 @@ def batch_friction_cone_basis(normals, mu, k=8):
 
     return F_basis
 
+def get_data_cpf_set(cpf_set, mjx_data):
+    geom_poss_tmp = []
+    rot_mats_geom_tmp = []
+    com_poss_tmp = []
+    rot_mats_com_tmp = []
+    for cpf in cpf_set:
+        geom_ids = cpf.get_geom_ids()
+        particles_body_ids = cpf.get_particles_body_ids()
+        geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
+        = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
+        geom_poss_tmp.append(geom_poss_world)
+        rot_mats_geom_tmp.append(rot_mats_geom_world)
+        com_poss_tmp.append(com_poss_world)
+        rot_mats_com_tmp.append(rot_mats_com_world)
+    geom_poss_world = jnp.concatenate(geom_poss_tmp, axis=0)
+    rot_mats_geom_world = jnp.concatenate(rot_mats_geom_tmp, axis=0)
+    com_poss_world = jnp.concatenate(com_poss_tmp, axis=0)
+    rot_mats_com_world = jnp.concatenate(rot_mats_com_tmp, axis=0)
+    return geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world
+
 def compute_site_ids(model, particles_link_names, search_body_names):
     counts = {name: 2 for name in search_body_names}
     particles_site_ids = []
@@ -137,6 +157,44 @@ def compute_site_ids(model, particles_link_names, search_body_names):
         particles_site_ids.append(particle_site_id)
     particles_site_ids = jnp.array(particles_site_ids)
     return particles_site_ids
+
+def rest_cpf_id(n_contacts, cur_idx):
+    # Compute the remaining contact particle filter IDs
+    rest_ids = []
+    for i in range(n_contacts):
+        if i != cur_idx:
+            rest_ids.append(i)
+    return jnp.array(rest_ids)
+
+def get_cpf_pos(cpf_set):
+    """
+    Get the positions of the particles in the contact particle filter set.
+    
+    Args:
+        cpf_set: List of ContactParticleFilter objects.
+    
+    Returns:
+        jnp.ndarray: Positions of the particles in the contact particle filter set.
+    """
+    particles_positions = []
+    for cpf in cpf_set:
+        particles_positions.append(cpf.get_particles_positions())
+    return jnp.concatenate(particles_positions, axis=0)
+
+def get_cpf_rot(cpf_set):
+    """
+    Get the rotations of the particles in the contact particle filter set.
+    
+    Args:
+        cpf_set: List of ContactParticleFilter objects.
+    
+    Returns:
+        jnp.ndarray: Rotations of the particles in the contact particle filter set.
+    """
+    particles_rotations = []
+    for cpf in cpf_set:
+        particles_rotations.append(cpf.get_particles_rotations())
+    return jnp.concatenate(particles_rotations, axis=0)
 
 class ContactParticleFilter:
     def __init__(self, model, data, n_particles=1000, robot_name="kuka_iiwa_14", search_body_names=["link7"], ext_f_norm=5.0,
@@ -196,13 +254,28 @@ class ContactParticleFilter:
             raise ValueError("Unknown resampling method: {}".format(method))
 
     def get_particles_data(self):
+        return self.get_particles_data_from_indexes(self.particles_indexes)
+
+    def get_particles_data_from_indexes(self, particles_indexes):
         particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names = \
-        self.sampler.get_data(self.particles_indexes)
+        self.sampler.get_data(particles_indexes)
         particles_site_ids = compute_site_ids(self.model, particles_link_names, self.search_body_names)   
         particles_body_ids = jnp.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in particles_link_names])
-        forces_normal = forces_normal * self.ext_f_norm  # Scale the forces by the external force norm
+        forces_normal = forces_normal * self.ext_f_norm
         return particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names, \
-               particles_site_ids, particles_body_ids
+                particles_site_ids, particles_body_ids
+
+    def get_particles_center_data(self):
+        # TODO: make sure the data is correct
+        particles = self.get_particles_positions()
+        particles_center = jnp.mean(particles, axis=0)
+        nearest_particles_indexes = self.sampler.find_nearest_indexes(jnp.array([particles_center]), self.search_body_names)
+        return self.get_particles_data_from_indexes(nearest_particles_indexes)
+    
+    def get_random_particle_data(self):
+        key = jax.random.PRNGKey(np.random.randint(0, 1000000))
+        random_index = jax.random.choice(key, self.particles_indexes, shape=(1,), p=jnp.ones(self.n_particles) / self.n_particles)
+        return self.get_particles_data_from_indexes(random_index)
 
     def get_particles_positions(self):
         return self.get_particles_data()[0]
@@ -225,65 +298,104 @@ class ContactParticleFilter:
     def get_particles_forces(self):
         return self.get_particles_data()[1]
 
-def cpf_step(cpf, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=20, particle_history=[], 
+def cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=20, particle_history=[], 
              average_errors=[], data_log=None, qp_loss=True, qp_solver=None, polyhedral_num=4):
-    # TODO:batch computing the geom and com positions in th world frame
     qpos = mjx_data.qpos
     for i in range(iters):
-        key, subkey = jax.random.split(key)
-        # TODO: perturbed the particles and return geom_ids, site_ids of the particles
-        cpf.predict_particles(subkey) # The perturbations are not based on geodesic distances, so could jump from link7 to link6
-        
-        particles, forces_normal, rots_mat_contact, face_vertices_select, geom_ids, particles_link_names, \
-        particles_site_ids, particles_body_ids = cpf.get_particles_data()
-        
-        geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-        = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
-        
-        # TODO: change the computation to use batch rot_mat_geom_world, geom_pos_pos_world, com_pos_world etc.
-        jacobians, contact_poss_coms, rot_mats_contact_com, quats = \
-        compute_batch_site_jac_pipeline(rots_mat_contact, particles, rot_mats_geom_world,
-                                        rot_mats_com_world, geom_poss_world, com_poss_world, 
-                                        mjx_model, mjx_data, qpos, particles_site_ids)
-        
-        # wait till the jacobian is computed
-        jax.block_until_ready(jacobians)
-        
-        # Compute the contact position basis
-        # TODO: change the computation to use batch rot_mat_geom_world and geom_pos_world
-        normal_vecs_world = batch_vecs_world_coor(forces_normal, rot_mats_geom_world, geom_poss_world)
-        friction_cone_basises = batch_friction_cone_basis(normal_vecs_world, mu=batch_qp_solver.mu, k=polyhedral_num)
-        
-        if not qp_loss:
-            contact_pos_target = data_log["contact_pos_target"]
-            measurement_noise = cpf.measurement_noise
-            contact_pos_target_measurement = contact_pos_target + jax.random.normal(key=key, shape=contact_pos_target.shape) * measurement_noise
-            errors = jnp.linalg.norm(particles - contact_pos_target_measurement, axis=1)
-        else:
-            # params, errors = solve_batch_qp(jacobians, gt_ext_tau)
-            if qp_solver is not None:
-                params, errors = [], []
-                for i in range(len(jacobians)):
-                    param, error = qp_solver.solve(np.array(jacobians[i]), np.array(gt_ext_tau))
-                    params.append(param)
-                    errors.append(error)
-                errors = jnp.array(errors).flatten()
-            else:
-                params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau),
-                                                                 np.array(friction_cone_basises),)
-        
-        cpf.update_weights(errors)
-        key, subkey = jax.random.split(key)        
-        cpf.resample_particles(subkey, method='multinomial')
-        
-        particles = cpf.get_particles_positions()  # Get the current particles positions
-        particle_history.append(particles)
-        average_errors.append(jnp.mean(errors))
+        for j in range(len(cpf_set)):
+            cpf = cpf_set[j]
+            key, subkey = jax.random.split(key)
+            cpf.predict_particles(subkey) # The perturbations are not based on geodesic distances, so could jump from link7 to link6
+            
+            # Retrieve cartesian space positions for jacobian computation
+            particles, forces_normal, rots_mat_contact, face_vertices_select, geom_ids, particles_link_names, \
+            particles_site_ids, particles_body_ids = cpf.get_particles_data()
+            geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
+            = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
+            
+            # Compute the jacobians
+            jacobians, contact_poss_coms, rot_mats_contact_com, quats = \
+            compute_batch_site_jac_pipeline(rots_mat_contact, particles, rot_mats_geom_world,
+                                            rot_mats_com_world, geom_poss_world, com_poss_world, 
+                                            mjx_model, mjx_data, qpos, particles_site_ids)
+            # wait till the jacobian is computed
+            jax.block_until_ready(jacobians)
+            
+            # Compute the friction cone basis vectors
+            normal_vecs_world = batch_vecs_world_coor(forces_normal, rot_mats_geom_world, geom_poss_world)
+            friction_cone_basises = batch_friction_cone_basis(normal_vecs_world, mu=batch_qp_solver.mu, k=polyhedral_num)
+            
+            # TODO: Retrieve jacobian for the rest particle sets
+            rest_ids = rest_cpf_id(len(cpf_set), j)
+            if len(rest_ids) > 0:
+                jacobians_rest_tmp = []
+                friction_cone_basises_rest_tmp = []
+                for k in rest_ids:
+                    cpf_rest = cpf_set[k]
+                    particles_rest, forces_normal_rest, rots_mat_contact_rest, face_vertices_select_rest, geom_ids_rest, \
+                    particles_link_names_rest, particles_site_ids_rest, particles_body_ids_rest = cpf_rest.get_particles_center_data()
 
-    geom_ids = cpf.get_geom_ids()
-    particles_body_ids = cpf.get_particles_body_ids()
-    geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-    = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
+                    geom_poss_world_rest, rot_mats_geom_world_rest, com_poss_world_rest, rot_mats_com_world_rest \
+                    = get_batch_contact_pos_rot(mjx_data, geom_ids_rest, particles_body_ids_rest)
+                    jacobians_rest, contact_poss_coms_rest, rot_mats_contact_com_rest, quats_rest = \
+                    compute_batch_site_jac_pipeline(rots_mat_contact_rest, particles_rest, rot_mats_geom_world_rest,
+                                                    rot_mats_com_world_rest, geom_poss_world_rest, com_poss_world_rest, 
+                                                    mjx_model, mjx_data, qpos, particles_site_ids_rest)
+                    jax.block_until_ready(jacobians_rest)
+                    normal_vecs_world_rest = batch_vecs_world_coor(forces_normal_rest, rot_mats_geom_world_rest, geom_poss_world_rest)
+                    friction_cone_basises_rest = batch_friction_cone_basis(normal_vecs_world_rest, mu=batch_qp_solver.mu, k=polyhedral_num)
+                    # Append the jacobians and friction cone basises for the rest particle sets
+                    jacobians_rest_tmp.append(jacobians_rest)
+                    friction_cone_basises_rest_tmp.append(friction_cone_basises_rest)
+                    
+                # Brocast the jacobians for the rest particle sets
+                jacobians_rest = [jnp.tile(jacobian, (jacobians.shape[0], 1, 1)) for jacobian in jacobians_rest_tmp]
+                jacobians_rest.insert(0, jacobians)  # Insert the current jacobian at the beginning
+                
+                # Concatenate the jacobians for the current particle set and the rest particle sets
+                jacobians = jnp.concatenate(jacobians_rest, axis=1)
+
+                # TODO: Remember to check the shape of friction_cone_basises
+                friction_cone_basises_rest = [jnp.tile(friction_cone_basis, (friction_cone_basises.shape[0], 1, 1)) for friction_cone_basis in friction_cone_basises_rest_tmp]
+                friction_cone_basises_rest.insert(0, friction_cone_basises)  #
+                friction_cone_basises = jnp.stack(friction_cone_basises_rest, axis=0)  # shape (n_contacts, n_particles, k, 3)
+            else:
+                # Add an extra dimension to the friction cone basises to fit the optimization framework
+                friction_cone_basises = friction_cone_basises.reshape((1, friction_cone_basises.shape[0], friction_cone_basises.shape[1], friction_cone_basises.shape[2]))
+            
+            if not qp_loss:
+                contact_pos_target = data_log["contact_pos_target"]
+                measurement_noise = cpf.measurement_noise
+                contact_pos_target_measurement = contact_pos_target + jax.random.normal(key=key, shape=contact_pos_target.shape) * measurement_noise
+                errors = jnp.linalg.norm(particles - contact_pos_target_measurement, axis=1)
+            else:
+                # params, errors = solve_batch_qp(jacobians, gt_ext_tau)
+                if qp_solver is not None:
+                    params, errors = [], []
+                    for i in range(len(jacobians)):
+                        param, error = qp_solver.solve(np.array(jacobians[i]), np.array(gt_ext_tau))
+                        params.append(param)
+                        errors.append(error)
+                    errors = jnp.array(errors).flatten()
+                else:
+                    params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau),
+                                                                    np.array(friction_cone_basises),)
+            
+            cpf.update_weights(errors)
+            key, subkey = jax.random.split(key)        
+            cpf.resample_particles(subkey, method='multinomial')
+            
+            particles = cpf.get_particles_positions()  # Get the current particles positions
+            particle_history.append(particles)
+            average_errors.append(jnp.mean(errors))
+
+    # manage particle sets
+
+    # geom_ids = cpf.get_geom_ids()
+    # particles_body_ids = cpf.get_particles_body_ids()
+    # geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
+    # = get_batch_contact_pos_rot(mjx_data, geom_ids, particles_body_ids)
+    geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world = get_data_cpf_set(cpf_set, mjx_data)
     return geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world
     
 def visualize_particles(fig, axes, particle_history, average_errors, contact_pos_target):
@@ -295,6 +407,7 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
 
     x_limit = 0.2
     y_limit = 0.2
+    colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
 
     def update(frame):
         particles = particle_history[frame]
@@ -304,7 +417,8 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
 
         # XY Plane
         particle_axes[0].scatter(particles[:, 0], particles[:, 1], c='blue', alpha=0.5)
-        particle_axes[0].scatter(contact_pos_target[0], contact_pos_target[1], c='red', s=100)
+        for i in range(len(contact_pos_target)):
+            particle_axes[0].scatter(contact_pos_target[i][0], contact_pos_target[i][1], c=colors[i], s=100)
         particle_axes[0].set_title(f"XY Plane (Iteration {frame+1})")
         particle_axes[0].set_xlabel("X")
         particle_axes[0].set_ylabel("Y")
@@ -313,7 +427,8 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
 
         # XZ Plane
         particle_axes[1].scatter(particles[:, 0], particles[:, 2], c='blue', alpha=0.5)
-        particle_axes[1].scatter(contact_pos_target[0], contact_pos_target[2], c='red', s=100)
+        for i in range(len(contact_pos_target)):
+            particle_axes[1].scatter(contact_pos_target[i][0], contact_pos_target[i][2], c=colors[i], s=100)
         particle_axes[1].set_title(f"XZ Plane (Iteration {frame+1})")
         particle_axes[1].set_xlabel("X")
         particle_axes[1].set_ylabel("Z")
@@ -322,7 +437,8 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
 
         # YZ Plane
         particle_axes[2].scatter(particles[:, 1], particles[:, 2], c='blue', alpha=0.5)
-        particle_axes[2].scatter(contact_pos_target[1], contact_pos_target[2], c='red', s=100)
+        for i in range(len(contact_pos_target)):
+            particle_axes[2].scatter(contact_pos_target[i][1], contact_pos_target[i][2], c=colors[i], s=100)
         particle_axes[2].set_title(f"YZ Plane (Iteration {frame+1})")
         particle_axes[2].set_xlabel("Y")
         particle_axes[2].set_ylabel("Z")
