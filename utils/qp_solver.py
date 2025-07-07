@@ -97,38 +97,41 @@ class QPSolver:
         self.polyhedral_num = polyhedral_num
         print(f"Initializing QP Solver with {n_joints} joints and {n_contacts} contacts, friction coefficient: {mu}")
 
-        # Define the contact force variable as linear combination of friction cone basis vectors
-        self.alpha_c = cp.Variable(self.n_contacts * polyhedral_num)  # Coefficients for the friction cone basis vectors
-
-        # Friction cone basis vectors
-        self.F_basis = cp.Parameter((self.n_contacts * polyhedral_num, 3))
+        self.friction_cone_basis = [cp.Parameter((self.polyhedral_num, 3)) for i in range(self.n_contacts)]
+        self.alpha_c = [cp.Variable(self.polyhedral_num) for i in range(self.n_contacts)]  # Coefficients for the friction cone basis vectors
+        self.f_c = cp.hstack([alpha_c @ frcition_cone_basis for alpha_c, frcition_cone_basis in zip(self.alpha_c, self.friction_cone_basis)])  # Contact forces as a linear combination of basis vectors
+        # self.f_c = [alpha_c @ friction_cone_basis for alpha_c, friction_cone_basis in zip(self.alpha_c, self.friction_cone_basis)]  # Contact forces as a linear combination of basis vectors
 
         # Define parameters for Jacobian and external torques
         self.Jc = cp.Parameter((3 * self.n_contacts, self.n_joints))  # Jacobian matrix
+        # self.Jc = [cp.Parameter((3, self.n_joints)) for _ in range(self.n_contacts)]
         self.tau_ext = cp.Parameter(self.n_joints)  # External torques
 
         # Define the objective function
-        self.f_c = self.alpha_c @ self.F_basis  # Contact forces as a linear combination of basis vectors
         self.objective = cp.Minimize(cp.sum_squares(self.Jc.T @ self.f_c - self.tau_ext))
+        # pred_tau = 0
+        # for i in range(self.n_contacts):
+        #     pred_tau += self.Jc[i].T @ self.f_c[i]
+        # residual = pred_tau - self.tau_ext
+        # self.objective = cp.Minimize(cp.sum_squares(residual))
         
         # Define the constraints for the contact forces
         self.constraints = []
         for i in range(self.n_contacts):
             for j in range(polyhedral_num):
-                alpha_idx = i * polyhedral_num + j
-                self.constraints.append(self.alpha_c[alpha_idx] >= 0)
+                self.constraints.append(self.alpha_c[i][j] >= 0)
 
         # Define the problem
         self.prob = cp.Problem(self.objective, self.constraints)
 
-    def solve(self, Jc, tau_ext, Fc_basis, verbose=False):
+    def solve(self, Jc, tau_ext, friction_cone_basis, verbose=False):
         """
         Solve the QP problem with updated parameters.
 
         Args:
             Jc (np.ndarray): Jacobian matrix of size (3, n_joints).
             tau_ext (np.ndarray): External torques of size (n_joints,).
-            Fc_basis (np.ndarray): shape (n_contacts * polyhedral_num, 3) friction cone basis vectors.
+            Fc_basis (np.ndarray): shape (n_contacts, polyhedral_num, 3) friction cone basis vectors.
 
         Returns:
             np.ndarray: Estimated contact forces of size (3 * n_contacts,).
@@ -138,13 +141,18 @@ class QPSolver:
         self.Jc.value = Jc
         self.tau_ext.value = tau_ext
 
-        self.F_basis.value = Fc_basis
+        for i in range(self.n_contacts):
+            self.friction_cone_basis[i].value = friction_cone_basis[i]  # Update the friction cone basis vectors
                     
-        # Solve the problem using OSQP
-        self.prob.solve(solver=cp.OSQP, warm_start=True, verbose=verbose)
+        # Solve the problem using MOSEK, for precision reasons
+        self.prob.solve(solver=cp.MOSEK, warm_start=True, verbose=verbose)
+
+        # Compute the residuals
+        residuals = self.Jc.value.T @ self.f_c.value - self.tau_ext.value
+        residuals = np.linalg.norm(residuals)
 
         # Return the results
-        return self.f_c.value, self.objective.value
+        return self.f_c.value, self.objective.value, residuals
     
 class BatchNonlinerQPSolver:
     def __init__(self, n_joints, n_contacts, n_qps, mu=0.5):
@@ -214,7 +222,7 @@ class BatchNonlinerQPSolver:
         self.tau_ext.value = tau_ext
 
         # Solve the problem
-        self.prob.solve(solver=cp.OSQP, warm_start=True)
+        self.prob.solve(solver=cp.MOSEK, warm_start=True)
 
         # Compute the residuals
         residuals = [self.Jc[i].value.T @ self.f_c[i].value - self.tau_ext.value for i in range(self.n_qps)]
@@ -227,7 +235,7 @@ class BatchNonlinerQPSolver:
         return f_c_values, self.objective.value, residuals
                 
 class BatchQPSolver:
-    def __init__(self, n_joints, n_contacts, n_qps, mu=0.5, polyhedral_num=4):
+    def __init__(self, n_joints, n_contacts, n_qps, mu=0.5, polyhedral_num=4, f_c_norm=20.0):
         """
         Initialize the batch QP solver.
 
@@ -249,7 +257,6 @@ class BatchQPSolver:
         self.f_c = [cp.hstack([alpha_c @ frcition_cone_basis for alpha_c, frcition_cone_basis in zip(self.alpha_c[i], self.friction_cone_basis[i])]) for i in range(self.n_qps)]  # Contact forces as a linear combination of basis vectors
 
         # Define parameters for Jacobians and external torques
-        # self.Jc = cp.Parameter((self.n_qps, 3 * self.n_contacts, self.n_joints))  # Jacobian matrices for all QPs
         self.Jc = [cp.Parameter((3 * self.n_contacts, self.n_joints)) for _ in range(self.n_qps)]  # Individual Jacobian for each QP
         self.tau_ext = cp.Parameter((self.n_joints))  # External torques for all QPs
 
@@ -262,12 +269,21 @@ class BatchQPSolver:
         for i in range(self.n_qps):
             for j in range(self.n_contacts):
                 for k in range(self.polyhedral_num):
-                    self.constraints.append(self.alpha_c[i][j][k] >= 0)
+                    self.constraints.append(self.alpha_c[i][j][k] >= 1e-4)
+        
+        # Add the constraints such that the norm of the contact forces are a constant.
+        for i in range(self.n_qps):
+            constraint1 = cp.norm(self.f_c[i][:3]) <= f_c_norm  # Ensure the norm of the contact forces is constant
+            constraint2 = cp.norm(self.f_c[i][3:]) <= f_c_norm  # Ensure the norm of the contact forces is constant
+            self.constraints.append(constraint1)
+            self.constraints.append(constraint2)
+            # self.constraints.append(constraint1 <= 1e-4)
+            # self.constraints.append(constraint2 <= 1e-4)
 
         # Define the problem
         self.prob = cp.Problem(self.objective, self.constraints)
 
-    def solve(self, Jc_batch, tau_ext, Friction_cone_basises):
+    def solve(self, Jc_batch, tau_ext, Friction_cone_basises, verbose=False):
         """
         Solve the batch QP problem with updated parameters.
 
@@ -281,7 +297,6 @@ class BatchQPSolver:
             float: Loss value of the optimization problem.
         """
         # Update the parameters
-        # self.Jc.value = Jc_batch
         for i in range(self.n_qps):
             self.Jc[i].value = Jc_batch[i, :, :]
         self.tau_ext.value = tau_ext
@@ -290,7 +305,7 @@ class BatchQPSolver:
                 self.friction_cone_basis[i][j].value = Friction_cone_basises[j][i, :, :]
 
         # Solve the problem
-        self.prob.solve(solver=cp.SCS, warm_start=True)
+        self.prob.solve(solver=cp.MOSEK, warm_start=True, verbose=verbose)
 
         # Compute the residuals
         residuals = [self.Jc[i].value.T @ self.f_c[i].value - self.tau_ext.value for i in range(self.n_qps)]

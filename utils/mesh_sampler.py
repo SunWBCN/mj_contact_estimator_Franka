@@ -550,6 +550,10 @@ class MeshSampler:
         """
         Update the sampling space with the global indices of the face centers
         """
+        feasible_idxes = self.compute_feasible_idxes(body_names)
+        self.feasible_idxes = feasible_idxes
+
+    def compute_feasible_idxes(self, body_names: list):
         body_ids = [_link_names_.index(body_name) for body_name in body_names]
         feasible_idxes = []
         for body_id in body_ids:
@@ -557,7 +561,7 @@ class MeshSampler:
             end = self.data_dict["global_start_end_indices"][body_id][1]
             feasible_idxes.extend(jnp.arange(start, end).tolist())
         feasible_idxes = jnp.array(feasible_idxes)
-        self.feasible_idxes = feasible_idxes
+        return feasible_idxes
 
     def sample_indexes_global(self, sample_body_names: None, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
@@ -578,6 +582,12 @@ class MeshSampler:
         idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
         return idxes
     
+    def sample_indexes_global_from_body(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        body_names = [body_name]
+        feasible_idxes = self.compute_feasible_idxes(body_names)
+        idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
+        return idxes
+    
     def get_data(self, global_idxs: jnp.ndarray):
         """
         Get the data corresponding to the global indices.
@@ -588,7 +598,8 @@ class MeshSampler:
         face_vertices_list = slice_with_indices(self.data_dict["global_face_vertices_list_jax"], global_idxs)
         geom_ids = slice_with_indices(self.data_dict["global_geom_ids"], global_idxs)
         link_names = self.global2link_name(global_idxs)
-        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names
+        mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
         
     def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """

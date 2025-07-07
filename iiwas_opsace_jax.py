@@ -32,13 +32,19 @@ def sample_contacts(mesh_sampler, target_body_names: list, n_contacts_per_body: 
     rot_mats_contact = []
     face_vertices = []
     total_target_body_names = []
+    global_idxes = []
     for target_body_name, n_contact_per_body in zip(target_body_names, n_contacts_per_body):
-        mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
-        mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contact_per_body, key=key)
+        # mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
+        # mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contact_per_body, key=key)
+        global_idxes_tmp = mesh_sampler.sample_indexes_global_from_body(target_body_name, n_contact_per_body, key=key)
+        global_idxes.extend(global_idxes_tmp)
+        contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select, geom_ids_, link_names, mesh_ids_ = \
+        mesh_sampler.get_data(global_idxes_tmp) 
+        mesh_ids.extend(mesh_ids_)
+        geom_ids.extend(geom_ids_)
         for _ in range(n_contact_per_body):
-            mesh_ids.append(mesh_id)
-            geom_ids.append(geom_id)
             total_target_body_names.append(target_body_name)
+        
         contact_poss.append(contact_poss_geom)
         normal_vecs.append(normal_vecs_geom)
         rot_mats_contact.append(rot_mats_contact_geom)
@@ -49,7 +55,8 @@ def sample_contacts(mesh_sampler, target_body_names: list, n_contacts_per_body: 
     face_vertices = jnp.concatenate(face_vertices, axis=0)
     mesh_ids = jnp.array(mesh_ids)
     geom_ids = jnp.array(geom_ids)
-    return mesh_ids, geom_ids, contact_poss, normal_vecs, rot_mats_contact, face_vertices, total_target_body_names
+    global_idxes = jnp.array(global_idxes)
+    return mesh_ids, geom_ids, contact_poss, normal_vecs, rot_mats_contact, face_vertices, total_target_body_names, global_idxes
 
 def merge_wrenches(model, equi_ext_wrenches, total_target_body_names):
     body_ids = np.array([model.body(target_body_name).id for target_body_name in total_target_body_names])
@@ -147,17 +154,14 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    target_body_names = ["link6", "link7"]
+    target_body_names = ["link6", "link7"]  # The bodies we want to sample contacts on
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     randomseed = np.random.randint(0, 10000)
     randomseed = 0
     n_contacts_per_body = [1 for _ in target_body_names]
     n_contacts = sum(n_contacts_per_body)
-    # mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rot_mats_contact_geom, face_vertices_select = \
-    # mesh_sampler.sample_body_pos_normal_jax(target_body_name, num_samples=n_contacts, key=jax.random.PRNGKey(randomseed))
-    # print("Time taken to sample mesh point:", time.time() - start_time)
     taget_mesh_ids, target_geom_ids, target_contact_poss_geom, target_normal_vecs_geom, \
-    target_rot_mats_contact_geom, target_face_vertices_select, total_target_body_names = \
+    target_rot_mats_contact_geom, target_face_vertices_select, total_target_body_names, global_idxes = \
     sample_contacts(mesh_sampler, target_body_names, n_contacts_per_body, key=jax.random.PRNGKey(randomseed))
 
     # Fixed value for testing
@@ -201,14 +205,16 @@ def main() -> None:
         # TODO: retrieve the site_ids after initialized the particles, the site ids are aligned with each particle
         # and use search_body_names instead of target_body_name
         search_body_names = target_body_names
-        # search_body_names.append("link5") # Add a body for the search space of the contact particle filter
+        search_body_names = [["link6"], ["link7"]]
+        # search_body_names.append("link7") # Add a body for the search space of the contact particle filter
         n_particles = 100
-        n_particles_per_body = n_particles // n_contacts
+        n_cpf_set = n_contacts
+        n_particles_per_group = n_particles // n_cpf_set
         cpf_set = []
-        for _ in range(n_contacts):
-            cpf = ContactParticleFilter(model=model, data=data, n_particles=n_particles_per_body, robot_name="kuka_iiwa_14",
-                                        search_body_names=search_body_names, ext_f_norm=ext_f_norm,
-                                        importance_distribution_noise=0.02, measurement_noise=0.02)
+        for j in range(n_cpf_set):
+            cpf = ContactParticleFilter(model=model, data=data, n_particles=n_particles_per_group, robot_name="kuka_iiwa_14",
+                                        search_body_names=search_body_names[j], ext_f_norm=ext_f_norm,
+                                        importance_distribution_noise=0.01, measurement_noise=0.01)
             cpf.initialize_particles()
             cpf_set.append(cpf)
     
@@ -219,10 +225,10 @@ def main() -> None:
         average_errors = []
         gt_ext_tau = jnp.zeros(model.nv)
         update_gt_ext_tau = False
-        mu = 200.0
+        mu = 200
         polyhedral_num = 4
-        # qp_solver = QPSolver(n_joints=model.nv, n_contacts=n_contacts, mu=mu, polyhedral_num=polyhedral_num)
-        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=n_contacts, n_qps=cpf.n_particles, mu=mu,
+        qp_solver = QPSolver(n_joints=model.nv, n_contacts=n_contacts, mu=mu, polyhedral_num=polyhedral_num)
+        batch_qp_solver = BatchQPSolver(n_joints=model.nv, n_contacts=n_cpf_set, n_qps=cpf.n_particles, mu=mu,
                                         polyhedral_num=polyhedral_num)
         # qp_nonlinear_solver = QPNonlinearSolver(n_joints=model.nv, n_contacts=n_contacts, mu=mu)
     
@@ -271,8 +277,8 @@ def main() -> None:
                     if applied_times < 10000:
                         wrench_applier.apply_predefined_wrench()
                 else:
-                    wrench_applier.apply_wrenches(equi_ext_wrenches, body_names) # TODO: now it's a list, need to update the
-                                                                                        # apply_wrench interface
+                    wrench_applier.apply_wrenches(equi_ext_wrenches, body_names) # TODO: now it's a list, need to update
+                                                                                 # the apply_wrench interface
                 applied_times += 1
         else:
             if applied_ext_f:
@@ -313,15 +319,16 @@ def main() -> None:
             data = mjx.get_data(model, mjx_data)
             jax.block_until_ready(data)
             mujoco.mj_forward(model, data)
-            data_log = {"contact_pos_target": contact_pos_target, "jacobian_contact": jacobian_contacts, 
+            data_log = {"contact_pos_target": contact_pos_target, "target_jacobian_contact": jacobian_contacts, 
                         "ext_wrenches": ext_wrenches, "target_normal_vecs_geom": target_normal_vecs_geom,
                         "target_rot_mats_contact_geom": target_rot_mats_contact_geom,
-                        "target_geom_ids": target_geom_ids, "target_body_names": total_target_body_names}
+                        "target_geom_ids": target_geom_ids, "target_body_names": total_target_body_names,
+                        "target_global_indexes": global_idxes}
             if update_gt_ext_tau:
                 geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
                 = cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history,
                            average_errors=average_errors, iters=10, data_log=data_log, batch_qp_solver=batch_qp_solver,
-                           polyhedral_num=polyhedral_num)            
+                           polyhedral_num=polyhedral_num, qp_loss=True, qp_solver=None,)            
             else:
                 # TODO: retrieve the positions in particle sets instead of only one particle set 
                 geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world = get_data_cpf_set(cpf_set, mjx_data)
@@ -331,6 +338,7 @@ def main() -> None:
             carry["carry_particles"]["geom_origin_mats_world"] = particles_rot_mat_geom_world # TODO: need to update in a batch manner
             carry["carry_particles"]["particles_pos_geom"] = get_cpf_pos(cpf_set)
             carry["carry_particles"]["particles_mat_geom"] = get_cpf_rot(cpf_set)
+            carry["carry_particles"]["n_particles_per_group"] = n_particles_per_group
                     
         # # Compute the inverse dynamics torques.
         # mujoco.mj_forward(model, data)

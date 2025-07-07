@@ -257,7 +257,7 @@ class ContactParticleFilter:
         return self.get_particles_data_from_indexes(self.particles_indexes)
 
     def get_particles_data_from_indexes(self, particles_indexes):
-        particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names = \
+        particles, forces_normal, rot_mats_contact_geom, face_vertices_select, geom_ids, particles_link_names, mesh_ids = \
         self.sampler.get_data(particles_indexes)
         particles_site_ids = compute_site_ids(self.model, particles_link_names, self.search_body_names)   
         particles_body_ids = jnp.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in particles_link_names])
@@ -272,9 +272,17 @@ class ContactParticleFilter:
         nearest_particles_indexes = self.sampler.find_nearest_indexes(jnp.array([particles_center]), self.search_body_names)
         return self.get_particles_data_from_indexes(nearest_particles_indexes)
     
+    def get_most_probable_particle_data(self):
+        # Get the index of the particle with the highest weight
+        max_weight_index = jnp.argmax(self.weight)
+        # Get the corresponding particle index
+        most_probable_particle_index = self.particles_indexes[max_weight_index]
+        # Retrieve the data for that particle
+        return self.get_particles_data_from_indexes(jnp.array([most_probable_particle_index]))
+    
     def get_random_particle_data(self):
         key = jax.random.PRNGKey(np.random.randint(0, 1000000))
-        random_index = jax.random.choice(key, self.particles_indexes, shape=(1,), p=jnp.ones(self.n_particles) / self.n_particles)
+        random_index = jax.random.choice(key, self.particles_indexes, shape=(1,), p=self.weight)
         return self.get_particles_data_from_indexes(random_index)
 
     def get_particles_positions(self):
@@ -301,12 +309,51 @@ class ContactParticleFilter:
 def cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, iters=20, particle_history=[], 
              average_errors=[], data_log=None, qp_loss=True, qp_solver=None, polyhedral_num=4):
     qpos = mjx_data.qpos
+    
+    # Prepare the ground truth data for validation
+    if data_log is not None:
+        target_ext_wrenches = jnp.hstack(jnp.array([data_log["ext_wrenches"][i][:3] for i in range(batch_qp_solver.n_contacts)]))
+        contact_pos_target = data_log["contact_pos_target"]
+        target_jacobian_contact = data_log["target_jacobian_contact"]
+        target_normal_vecs = data_log["target_normal_vecs_geom"]
+        target_geom_ids = data_log["target_geom_ids"]
+        target_body_names = data_log["target_body_names"]
+        target_body_ids = jnp.array([mujoco.mj_name2id(cpf_set[0].model, mujoco.mjtObj.mjOBJ_BODY, name) for name in target_body_names])
+        target_global_idxes = data_log["target_global_indexes"]
+
+        # stack the target jacobian
+        target_jacobian_contact = [target_jacobian[:3, :] for target_jacobian in target_jacobian_contact]
+        target_jacobian_contact = jnp.concatenate(target_jacobian_contact, axis=0) # shape (n_contacts * 3, nv)
+        # target_jacobian_contact = target_jacobian_contact[0]
+        target_jacobian_contact = jnp.tile(target_jacobian_contact, (cpf_set[0].n_particles, 1, 1)) # shape (iters, n_contacts * 3, nv)
+
+        target_geom_poss_world, target_rot_mats_geom_world, target_com_poss_world, target_rot_mats_com_world \
+        = get_batch_contact_pos_rot(mjx_data, target_geom_ids, target_body_ids)
+        target_normal_vecs_world = batch_vecs_world_coor(target_normal_vecs, target_rot_mats_geom_world, target_geom_poss_world)
+        target_friction_cone_basises = batch_friction_cone_basis(target_normal_vecs_world, mu=batch_qp_solver.mu, k=polyhedral_num)
+        # target_friction_cone_basises = jnp.tile(target_friction_cone_basises, (target_friction_cone_basises.shape[0], cpf_set[0].n_particles, 1, 1)) # shape (iters, n_contacts, k, 3)
+        # repeat the target friction cone basises for each particle, so that it can be used in the optimization, the shape is (n_contacts, n_particles, k, 3)        
+        target_friction_cone_basises = jnp.tile(target_friction_cone_basises[:, None, :, :], (1, cpf_set[0].n_particles, 1, 1)) # shape (n_contacts, n_particles, k, 3)
+
+        # QP based loss
+        if qp_solver is not None:
+            target_jacobian_contact_ = target_jacobian_contact[0]
+            target_friction_cone_basises_ = target_friction_cone_basises[:, 0, :, :]
+            target_param_qp, target_residual_qp, target_errors = qp_solver.solve(np.array(target_jacobian_contact_), 
+                                                                                   np.array(gt_ext_tau),
+                                                                                   np.array(target_friction_cone_basises_)
+                                                                                   )
+        else:
+            target_params, target_residual, target_errors = batch_qp_solver.solve(np.array(target_jacobian_contact),
+                                                                                  np.array(gt_ext_tau),
+                                                                                  np.array(target_friction_cone_basises))
+
     for i in range(iters):
         for j in range(len(cpf_set)):
             cpf = cpf_set[j]
             key, subkey = jax.random.split(key)
             cpf.predict_particles(subkey) # The perturbations are not based on geodesic distances, so could jump from link7 to link6
-            
+           
             # Retrieve cartesian space positions for jacobian computation
             particles, forces_normal, rots_mat_contact, face_vertices_select, geom_ids, particles_link_names, \
             particles_site_ids, particles_body_ids = cpf.get_particles_data()
@@ -323,6 +370,9 @@ def cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, ite
             
             # Compute the friction cone basis vectors
             normal_vecs_world = batch_vecs_world_coor(forces_normal, rot_mats_geom_world, geom_poss_world)
+            
+            # for the indexes of the contact particle filter that equal to the target contact indexes, set mu to 200.0
+            # else set mu to 0.5
             friction_cone_basises = batch_friction_cone_basis(normal_vecs_world, mu=batch_qp_solver.mu, k=polyhedral_num)
             
             # TODO: Retrieve jacobian for the rest particle sets
@@ -333,7 +383,11 @@ def cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, ite
                 for k in rest_ids:
                     cpf_rest = cpf_set[k]
                     particles_rest, forces_normal_rest, rots_mat_contact_rest, face_vertices_select_rest, geom_ids_rest, \
-                    particles_link_names_rest, particles_site_ids_rest, particles_body_ids_rest = cpf_rest.get_particles_center_data()
+                    particles_link_names_rest, particles_site_ids_rest, particles_body_ids_rest \
+                    = cpf_rest.get_random_particle_data()
+                    # particles_rest, forces_normal_rest, rots_mat_contact_rest, face_vertices_select_rest, geom_ids_rest, \
+                    # particles_link_names_rest, particles_site_ids_rest, particles_body_ids_rest \
+                    # = cpf_rest.get_most_probable_particle_data()
 
                     geom_poss_world_rest, rot_mats_geom_world_rest, com_poss_world_rest, rot_mats_com_world_rest \
                     = get_batch_contact_pos_rot(mjx_data, geom_ids_rest, particles_body_ids_rest)
@@ -364,23 +418,26 @@ def cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau, batch_qp_solver, ite
                 friction_cone_basises = friction_cone_basises.reshape((1, friction_cone_basises.shape[0], friction_cone_basises.shape[1], friction_cone_basises.shape[2]))
             
             if not qp_loss:
-                contact_pos_target = data_log["contact_pos_target"]
-                measurement_noise = cpf.measurement_noise
-                contact_pos_target_measurement = contact_pos_target + jax.random.normal(key=key, shape=contact_pos_target.shape) * measurement_noise
-                errors = jnp.linalg.norm(particles - contact_pos_target_measurement, axis=1)
+                contact_pos_target = data_log["contact_pos_target"][j]
+                # measurement_noise = cpf.measurement_noise
+                # contact_pos_target_measurement = contact_pos_target + jax.random.normal(key=key, shape=contact_pos_target.shape) * measurement_noise
+                particle_positions = cpf.get_particles_positions()  # Get the current particles positions
+                errors = jnp.linalg.norm(particle_positions - contact_pos_target, axis=1)
+                errors = np.array(errors)
             else:
                 # params, errors = solve_batch_qp(jacobians, gt_ext_tau)
                 if qp_solver is not None:
                     params, errors = [], []
                     for i in range(len(jacobians)):
-                        param, error = qp_solver.solve(np.array(jacobians[i]), np.array(gt_ext_tau))
+                        param, residual, error = qp_solver.solve(np.array(jacobians[i]), np.array(gt_ext_tau),
+                                                       np.array(friction_cone_basises[:, i, :, :]))
                         params.append(param)
                         errors.append(error)
-                    errors = jnp.array(errors).flatten()
+                    errors = np.array(errors)
                 else:
                     params, residual, errors = batch_qp_solver.solve(np.array(jacobians), np.array(gt_ext_tau),
-                                                                    np.array(friction_cone_basises),)
-            
+                                                                     np.array(friction_cone_basises),)
+            # print(sorted(errors), target_errors)
             cpf.update_weights(errors)
             key, subkey = jax.random.split(key)        
             cpf.resample_particles(subkey, method='multinomial')
@@ -445,33 +502,33 @@ def visualize_particles(fig, axes, particle_history, average_errors, contact_pos
         particle_axes[2].set_xlim(-x_limit, x_limit)
         particle_axes[2].set_ylim(-y_limit, y_limit)
 
-        # Update error plot
-        error_ax.clear()
-        error_ax.plot(range(1, frame + 2), average_errors[:frame + 1], marker='o', linestyle='-', color='blue')
-        error_ax.set_title("Evolution of Average Errors")
-        error_ax.set_xlabel("Iteration")
-        error_ax.set_ylabel("Average Error")
-        error_ax.grid(True)
+        # # Update error plot
+        # error_ax.clear()
+        # error_ax.plot(range(1, frame + 2), average_errors[:frame + 1], marker='o', linestyle='-', color='blue')
+        # error_ax.set_title("Evolution of Average Errors")
+        # error_ax.set_xlabel("Iteration")
+        # error_ax.set_ylabel("Average Error")
+        # error_ax.grid(True)
         
-        # Update the error plot for particle center
-        particle_center_ax.clear()
-        particles_center_error = jnp.linalg.norm(particles_center - contact_pos_target, axis=1)
-        particle_center_ax.plot(range(1, frame + 2), particles_center_error, marker='o', linestyle='-', color='green')
-        particle_center_ax.set_title("Error of Particle Center")
-        particle_center_ax.set_xlabel("Iteration")
-        particle_center_ax.set_ylabel("Error")
-        particle_center_ax.set_ylim(0, 0.1)
-        particle_center_ax.grid(True)
+        # # Update the error plot for particle center
+        # particle_center_ax.clear()
+        # particles_center_error = jnp.linalg.norm(particles_center - contact_pos_target, axis=1)
+        # particle_center_ax.plot(range(1, frame + 2), particles_center_error, marker='o', linestyle='-', color='green')
+        # particle_center_ax.set_title("Error of Particle Center")
+        # particle_center_ax.set_xlabel("Iteration")
+        # particle_center_ax.set_ylabel("Error")
+        # particle_center_ax.set_ylim(0, 0.1)
+        # particle_center_ax.grid(True)
         
-        # Update the minimum error plot
-        minimum_error_ax.clear()
-        min_error = jnp.min(jnp.array(average_errors[:frame + 1]))
-        minimum_error_ax.plot(range(1, frame + 2), [min_error] * (frame + 1), marker='o', linestyle='-', color='orange')
-        minimum_error_ax.set_title("Minimum Error")
-        minimum_error_ax.set_xlabel("Iteration")
-        minimum_error_ax.set_ylabel("Minimum Error")
-        minimum_error_ax.set_ylim(0, 1)
-        minimum_error_ax.grid(True)
+        # # Update the minimum error plot
+        # minimum_error_ax.clear()
+        # min_error = jnp.min(jnp.array(average_errors[:frame + 1]))
+        # minimum_error_ax.plot(range(1, frame + 2), [min_error] * (frame + 1), marker='o', linestyle='-', color='orange')
+        # minimum_error_ax.set_title("Minimum Error")
+        # minimum_error_ax.set_xlabel("Iteration")
+        # minimum_error_ax.set_ylabel("Minimum Error")
+        # minimum_error_ax.set_ylim(0, 1)
+        # minimum_error_ax.grid(True)
 
     fps = 60
     interval = 1000 / fps  # milliseconds

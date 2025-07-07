@@ -473,7 +473,24 @@ class MujocoViewer(Callbacks):
         geom_origin_mats_world = carry_particles["geom_origin_mats_world"]
         particles_pos_geom = carry_particles["particles_pos_geom"]
         particles_mat_geom = carry_particles["particles_mat_geom"]
-        rgba = carry_particles.get("rgba", np.array([1.0, 0.0, 0.0, 1.0]))
+        particles_per_group = carry_particles["n_particles_per_group"]
+        num_particles = len(particles_pos_geom) 
+        num_groups = num_particles // particles_per_group
+        # rgba = carry_particles.get("rgba", np.array([1.0, 0.0, 0.0, 1.0]))
+        # assume no more than 6 groups
+        if num_groups > 6:
+            raise ValueError(
+                "Number of groups exceeds 6, which is not supported by this visualization method.")
+        rgba_values = {
+            "red": [1.0, 0.0, 0.0, 1.0],      # Red
+            "green": [0.0, 1.0, 0.0, 1.0],    # Green
+            "blue": [0.0, 0.0, 1.0, 1.0],     # Blue
+            "yellow": [1.0, 1.0, 0.0, 1.0],   # Yellow
+            "black": [0.0, 0.0, 0.0, 1.0],    # Black
+            "pink": [1.0, 0.0, 1.0, 1.0]      # Pink
+        }
+        rgba_keys = ["red", "green", "blue", "yellow", "black", "pink"]
+        rgbas = [np.array(rgba_values[rgba_keys[i]]) for i in range(num_groups)]
         radius = carry_particles.get("radius", 0.01)
         
         def update_scene(scene, sphere_pos_world, sphere_rot_mat_world, rgba, radius):
@@ -487,10 +504,14 @@ class MujocoViewer(Callbacks):
                 mat=sphere_rot_mat_world.flatten(),
                 rgba=rgba.astype(np.float32),
             )
+        i = 0
         for pos_geom, rot_mat_geom, geom_origin_pos_world, geom_origin_mat_world in zip(particles_pos_geom, particles_mat_geom, geom_origin_poss_world, geom_origin_mats_world):
+            group_idx = i // particles_per_group
             sphere_mat_world = geom_origin_mat_world @ rot_mat_geom
             sphere_pos_world = geom_origin_pos_world + geom_origin_mat_world @ pos_geom
+            rgba = rgbas[group_idx]
             update_scene(self.scn, sphere_pos_world, sphere_mat_world, rgba, radius)
+            i += 1
 
     def render(self, carry=None, vis_arrows=False, vis_particles=False):
         if self.render_mode == 'offscreen':
