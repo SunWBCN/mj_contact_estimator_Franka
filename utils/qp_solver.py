@@ -273,12 +273,12 @@ class BatchQPSolver:
         
         # Add the constraints such that the norm of the contact forces are a constant.
         for i in range(self.n_qps):
-            constraint1 = cp.norm(self.f_c[i][:3]) <= f_c_norm  # Ensure the norm of the contact forces is constant
-            constraint2 = cp.norm(self.f_c[i][3:]) <= f_c_norm  # Ensure the norm of the contact forces is constant
-            self.constraints.append(constraint1)
-            self.constraints.append(constraint2)
-            # self.constraints.append(constraint1 <= 1e-4)
-            # self.constraints.append(constraint2 <= 1e-4)
+            constraint1 = cp.norm(self.f_c[i][:3]) - f_c_norm  # Ensure the norm of the contact forces is constant
+            constraint2 = cp.norm(self.f_c[i][3:]) - f_c_norm  # Ensure the norm of the contact forces is constant
+            # self.constraints.append(constraint1)
+            # self.constraints.append(constraint2)
+            self.constraints.append(constraint1 <= 1e-4)
+            self.constraints.append(constraint2 <= 1e-4)
 
         # Define the problem
         self.prob = cp.Problem(self.objective, self.constraints)
