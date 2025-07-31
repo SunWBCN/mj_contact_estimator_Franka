@@ -139,23 +139,16 @@ if __name__ == "__main__":
             if torch.any(t_flat == 1.0):
                 t_flat = torch.where(t_flat == 1.0, torch.ones_like(t_flat) * 0.99, t_flat)
             
-            # # plot the distribution of t_flat
-            # t_flat_vis = t_flat.flatten().detach().cpu().numpy()
-            # plt.hist(t_flat_vis, bins=50)
-            # # step_size_vis = stepsize.flatten().detach().cpu().numpy()
-            # # plt.hist(step_size_vis, bins=50)
-            # plt.title("Distribution of t_flat")
-            # plt.xlabel("t_flat")
-            # plt.ylabel("Density")
-            # plt.show()
-            
             # compute the Boltzmann distribution
             # expont = - (distances - torch.max(distances, dim=1, keepdim=True)[0]) # stabilizing techniques     
             expont = - distances
             divider = temp * (1 - t_flat) / t_flat  # Avoid division by zero   
             expont = expont / divider
+            
+            # expont = torch.tanh(t_flat * 4) * (-distances) / (1 - t_flat)
+            
             expont_max = torch.max(expont, dim=1, keepdim=True)[0]
-            expont = expont - expont_max  # TODO: stabilizing techniques, it's necessary for uniform time, i don't know why
+            expont = expont - expont_max
             
             boltzmann_dist = torch.exp(expont) / torch.sum(torch.exp(expont), dim=1, keepdim=True)
             # for i in range(boltzmann_dist.shape[0]):
