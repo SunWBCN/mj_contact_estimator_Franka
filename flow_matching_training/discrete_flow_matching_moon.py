@@ -28,21 +28,25 @@ if __name__ == "__main__":
 
     model = DiscreteFlow(v=vocab_size)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    wnb.init(project="Contact Force Estimation", name="DiscreteFlowMatchingMoon")
-    wnb.watch(model, log="all")
     
-    # log hyperparameters
-    wnb.config.update({
-        "batch_size": batch_size,
-        "vocab_size": vocab_size,
-        "learning_rate": lr,
-        "num_epochs": num_epochs,
-    })
+    use_wnb = False
+    if use_wnb:
+        wnb.init(project="Contact Force Estimation", name="DiscreteFlowMatchingMoon")
+        wnb.watch(model, log="all")
+        
+        # log hyperparameters
+        wnb.config.update({
+            "batch_size": batch_size,
+            "vocab_size": vocab_size,
+            "learning_rate": lr,
+            "num_epochs": num_epochs,
+        })
 
     for epoch in range(num_epochs):
         x_1 = Tensor(make_moons(batch_size, noise=0.05)[0])
         x_1 = torch.round(torch.clip(x_1 * 35 + 50, min=0.0, max=vocab_size - 1)).long()
-
+        # x_1 = torch.round(torch.clip(x_1 * 350 + 500, min=0.0, max=vocab_size - 1)).long()
+        
         x_0 = torch.randint(low=0, high=vocab_size, size=(batch_size, 2))
 
         t = torch.rand(batch_size)
@@ -54,29 +58,48 @@ if __name__ == "__main__":
         loss.backward()
         optim.step()
         
-        wnb.log({"loss": loss.item()})
-        wnb.log({"learning_rate": optim.param_groups[0]['lr']})
+        # t_vis = t.flatten().detach().cpu().numpy()
+        # plt.hist(t_vis, bins=50, density=True)
+        # plt.title("Distribution of t_flat")
+        # plt.xlabel("t_flat")
+        # plt.ylabel("Density")
+        # plt.show()
+        
+        if use_wnb:
+            wnb.log({"loss": loss.item()})
+            wnb.log({"learning_rate": optim.param_groups[0]['lr']})
                 
     # Sampling
     x_t = torch.randint(low=0, high=vocab_size, size=(200, 2))
     t = 0.0
+    div = 1
+    h_c = 0.1 / div
     results = [(x_t, t)]
     while t < 1.0 - 1e-3:
         p1 = torch.softmax(model(x_t, torch.ones(200) * t), dim=-1)
-        h = min(0.1, 1.0 - t)
+        h = min(h_c, 1.0 - t)
         one_hot_x_t = nn.functional.one_hot(x_t, vocab_size).float()
         u = (p1 - one_hot_x_t) / (1.0 - t)
         x_t = torch.distributions.Categorical(probs=one_hot_x_t + h * u).sample()
         t += h
         results.append((x_t, t))
 
-    fig, axes = plt.subplots(1, len(results), figsize=(15, 2), sharex=True, sharey=True)
+    if div > 1:
+        num_figs = len(results) // div + 1
+    else:
+        num_figs = len(results) // div
+    fig, axes = plt.subplots(1, num_figs, figsize=(15, 2), sharex=True, sharey=True)
 
-    for (x_t, t), ax in zip(results, axes):
-        ax.scatter(x_t.detach()[:, 0], x_t.detach()[:, 1], s=10)
-        ax.set_title(f't={t:.1f}')
+    count = 0
+    for (x_t, t) in results:
+        if count % div == 0:
+            ax = axes[count // div]
+            ax.scatter(x_t.detach()[:, 0], x_t.detach()[:, 1], s=10)
+            ax.set_title(f't={t:.1f}')
+        count += 1
 
-    wnb.log({"sampled_moons": wnb.Image(fig)})
-    wnb.finish()
+    if use_wnb:
+        wnb.log({"sampled_moons": wnb.Image(fig)})
+        wnb.finish()
     plt.tight_layout()
     plt.show()
