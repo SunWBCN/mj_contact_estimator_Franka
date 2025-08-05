@@ -1,0 +1,15 @@
+# training parameters
+vocab_size: 1024
+num_nearest_neibor: 101
+batch_size: 512
+num_epochs: 1000
+learning_rate: 0.001
+reschedule: False
+enforce: True
+temp_anneling: False
+temperature: 10  # Temperature for Boltzmann distribution
+use_wnb: False
+
+# sampling parameters
+div: 10
+sample_step: 0.1
