@@ -19,6 +19,21 @@ class DiscreteFlow(nn.Module):
     def forward(self, x_t: Tensor, t: Tensor) -> Tensor:
         return self.net(torch.cat((t[:, None], self.embed(x_t).flatten(1, 2)), -1)).reshape(list(x_t.shape) + [self.v])
     
+def chi_square_test(dset1, dset2):
+    """
+    Perform chi-squared test on two datasets.
+    """
+    from scipy.stats import chi2_contingency
+    import pandas as pd
+    
+    s1 = pd.Series(dset1, name='X1')
+    s2 = pd.Series(dset2, name='Xt')
+    contingency_table = pd.crosstab(s1, s2)
+    
+    chi2, p, dof, expected = chi2_contingency(contingency_table)
+    print(f"Chi-squared test: chi2={chi2}, p-value={p}")
+    return chi2, p
+    
 if __name__ == "__main__":
     # Training
     batch_size = 256
@@ -75,6 +90,7 @@ if __name__ == "__main__":
     div = 1
     h_c = 0.1 / div
     results = [(x_t, t)]
+    results_x_t = []
     while t < 1.0 - 1e-3:
         p1 = torch.softmax(model(x_t, torch.ones(200) * t), dim=-1)
         h = min(h_c, 1.0 - t)
@@ -83,6 +99,7 @@ if __name__ == "__main__":
         x_t = torch.distributions.Categorical(probs=one_hot_x_t + h * u).sample()
         t += h
         results.append((x_t, t))
+        results_x_t.append(x_t)
 
     if div > 1:
         num_figs = len(results) // div + 1
@@ -98,6 +115,14 @@ if __name__ == "__main__":
             ax.set_title(f't={t:.1f}')
         count += 1
 
+    # perform chi-squared test
+    results_x_t = torch.stack(results_x_t)
+    results_x_t = results_x_t.flatten()
+    dset_x1 = Tensor(make_moons(len(results_x_t), noise=0.05)[0])
+    dset_x1 = torch.round(torch.clip(dset_x1 * 35 + 50, min=0.0, max=vocab_size - 1)).long()
+    dset_x1 = dset_x1.flatten()
+    chi2, p = chi_square_test(dset_x1.numpy(), results_x_t.numpy())
+    
     if use_wnb:
         wnb.log({"sampled_moons": wnb.Image(fig)})
         wnb.finish()
