@@ -35,6 +35,17 @@ def chi_square_test(dset1, dset2):
     return chi2, p
     
 if __name__ == "__main__":
+    # Visualize the dataset
+    batch_size = 1000
+    x_1 = make_moons(batch_size, noise=0.0)[0]
+    plt.hist(x_1[:, 0], bins=50, alpha=0.5, label='x1[:, 0]')
+    plt.hist(x_1[:, 1], bins=50, alpha=0.5, label='x1[:, 1]')
+    plt.title("Distribution of x1")
+    plt.xlabel("Value")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.show()
+    
     # Training
     batch_size = 256
     vocab_size = 128
