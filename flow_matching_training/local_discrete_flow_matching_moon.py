@@ -4,6 +4,7 @@ from torch import nn, Tensor
 from sklearn.datasets import make_moons
 import wandb as wnb
 import yaml
+from pathlib import Path
 
 class DiscreteFlowLocal(nn.Module):
     def __init__(self, num_offsets: int  = 21, dim: int = 2, h: int = 128, v: int = 128):
@@ -69,7 +70,8 @@ def get_nearest_neighbors(x_t: Tensor, table: Tensor) -> Tensor:
 
 if __name__ == "__main__":    
     # load hyperparameters from yaml file
-    with open("config.yaml", "r") as f:
+    cur_dir = Path(__file__).resolve().parent
+    with open(cur_dir / "configs/config.yaml", "r") as f:
         config = yaml.safe_load(f)
     vocab_size = config.get("vocab_size", 128)
     num_nearest_neibor = config.get("num_nearest_neibor", 41)
@@ -85,7 +87,6 @@ if __name__ == "__main__":
     sample_step = config.get("sample_step")
     gap = (num_nearest_neibor - 1) // 2
     use_wnb = config.get("use_wnb")
-    
     table = generate_closest_indices_table(num_rows=vocab_size, num_closest=num_nearest_neibor)
     
     if reschedule:

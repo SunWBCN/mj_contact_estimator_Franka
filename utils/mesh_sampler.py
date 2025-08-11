@@ -203,7 +203,7 @@ class MeshSampler:
                 normal = -normal # by default pointing inwards
                 normal_list.append(normal)
                 face_center_list.append(face_center)
-                rot_mat = compute_arrow_rotation(normal, face_center, A)
+                rot_mat = compute_arrow_rotation(normal, face_center, A) 
                 rot_mat_list.append(rot_mat)
             data_dict_mesh_i["vis_face_list"] = np.array(vis_face_list)
             data_dict_mesh_i["normal_list"] = np.array(normal_list)
@@ -601,6 +601,61 @@ class MeshSampler:
         mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
         return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
         
+    def get_data_numpy(self, global_idxs: np.ndarray):
+        """
+        Get the data corresponding to the global indices in numpy format.
+        """
+        face_center_list = self.data_dict["global_face_center_list"][global_idxs]
+        normal_list = self.data_dict["global_normal_list"][global_idxs]
+        rot_mat_list = self.data_dict["global_rot_mat_list"][global_idxs]
+        face_vertices_list = self.data_dict["global_face_vertices_list"][global_idxs]
+        geom_ids = self.data_dict["global_geom_ids"][global_idxs]
+        link_names = self.global2link_name(global_idxs)
+        mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
+        
+    # def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
+    #     """
+    #     Get the data corresponding to the link names and local indices.
+        
+    #     Args:
+    #         link_names: List of link names to get data for.
+    #         local_idxes: Local indices corresponding to the link names.
+        
+    #     Returns:
+    #         face_center_list: Sampled positions (3D vectors).
+    #         normal_list: Sampled normal vectors (3D vectors).
+    #         rot_mat_list: Rotation matrices for the sampled normals.
+    #         face_vertices_list: Vertices of the sampled faces.
+    #         geom_ids: Geometric IDs corresponding to the sampled faces.
+    #     """
+    #     link_names_mapping = self.data_dict["mesh_names_mapping"]
+    #     face_center_list = []
+    #     normal_list = []
+    #     rot_mat_list = []
+    #     face_vertices_list = []
+    #     geom_ids = []
+    #     for link_name, local_idx in zip(link_names, local_idxes):
+    #         mesh_name = link_names_mapping[link_name]
+    #         mesh_data = self.data_dict[mesh_name]
+    #         face_center_list.append(mesh_data["face_center_list_jax"][local_idx])
+    #         normal_list.append(mesh_data["normal_list_jax"][local_idx])
+    #         rot_mat_list.append(mesh_data["rot_mat_list_jax"][local_idx])
+    #         face_vertices_list.append(mesh_data["face_vertices_list_jax"][local_idx])
+    #         geom_ids.append(mesh_data["geom_ids"][local_idx])
+    #     return np.array(face_center_list), np.array(normal_list), np.array(rot_mat_list), \
+    #             np.array(face_vertices_list), np.array(geom_ids)
+        
+    def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
+        link_name_ids = []
+        for link_name in link_names:
+            link_name_ids.append(_link_names_.index(link_name))
+        
+        starting_indices = self.data_dict["global_start_end_indices"][link_name_ids, 0]
+        global_idxs = starting_indices + local_idxes
+        face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids = self.get_data(global_idxs)
+        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids
+        
     def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
         Sample a position and normal vector from the mesh using JAX.
@@ -922,7 +977,7 @@ if __name__ == "__main__":
     xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/scene.xml").as_posix()
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
-    mesh_sampler = MeshSampler(model, data, init_mesh_data=True)
+    mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
     # vis_mesh_body_name = "link1"
     # print(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
     # mesh_id = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_id"]
