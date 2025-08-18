@@ -87,9 +87,19 @@ def assign_indices_to_names(lengths: jnp.ndarray, indices: jnp.ndarray, names: L
     assigned_names = [names[int(seg_id)] for seg_id in segment_ids]
     return assigned_names
 
-feasible_region_idxes = {"link_7": [[988, -1]], "link_6_orange": [[0, -1]], "link_5": [[800, 1800], [2000, -1]],
-                         "link_4_orange": [[0, -1]], "link_3": [[675, 5979], [6236, -1]], "link_2_orange": [[0, -1]],
+feasible_region_idxes = {"link_7": [[220, 357], [988, -1]], 
+                         "link_6_grey": [[1311, 2148], [2220, 2445], [2680, 2841], [3029, 3834], [4022, -1]],
+                         "link_6_orange": [[0, -1]], 
+                         "link_5": [[800, 1800], [2000, -1]], 
+                         "link_4_grey": [[0, -1]], 
+                         "link_4_orange": [[0, -1]],
+                         "link_3": [[675, 5979], [6236, -1]], 
+                         "link_2_grey": [[0, -1]], 
+                         "link_2_orange": [[0, -1]],
                          "link_1": [[400, 1000], [1000, 8120], [8451, -1]]}
+cross_link_region_idxes = {"link_7": [[220, 357]],
+                           "link_6_grey": [[2220, 2445], [2680, 2841], [3029, 3834]],
+                           }
 mesh_names_2_body_names = {
     "link_7": "link7",
     "link_6_orange": "link6",
@@ -102,9 +112,9 @@ mesh_names_2_body_names = {
     "link_2_grey": "link2",
     "link_1": "link1"
 }   
-_link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
-_mesh_names_ = ["link_1", "link_2_orange", "link_3", "link_4_orange", "link_4_grey", "link_5",
-                "link_6_orange", "link_7"]
+# _link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
+# _mesh_names_ = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
+#                 "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
 
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
@@ -112,6 +122,7 @@ class MeshSampler:
         self.data = data
         self.mesh_names = [model.mesh(i).name for i in range(model.nmesh)]
         self.geom_names = [model.geom(i).name for i in range(model.ngeom)]
+        # self.mesh_id 
         self.robot_name = robot_name
         if init_mesh_data:
             self._init_mesh_data()
@@ -122,7 +133,16 @@ class MeshSampler:
             for mesh_name in self.mesh_names:
                 if mesh_name not in self.data_dict:
                     print(f"Mesh {mesh_name} not found in loaded data.")
-    
+
+    def _skip_mesh(self, mesh_name: str) -> bool:
+        """
+        Determine whether to skip a mesh based on its name.
+        """
+        if self.robot_name == "kuka_iiwa_14":
+            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0"
+        else:
+            raise NotImplementedError(f"Robot {self.robot_name} not implemented for skipping meshes.")
+
     def _init_mesh_data(self):
         """
         Initialize mesh data for visualization.
@@ -131,9 +151,7 @@ class MeshSampler:
         print("Number of meshes:", self.model.nmesh)
         print("Number of vertices:", len(self.model.mesh_vertadr))
 
-        # TODO: prepare the data with global indexing instead of local indexing
         self.data_dict = {}
-        
         global_geom_ids = []
         global_normal_list = []
         global_face_center_list = []
@@ -144,6 +162,9 @@ class MeshSampler:
         globalid2geomname = []
         globalid2localid = []
         global_num_samples = []
+        global_mesh_ids = []
+        global_mesh_names = []
+        record_mesh_names = []
         
         for i in range(self.model.nmesh):
             geom_ids = []
@@ -165,9 +186,16 @@ class MeshSampler:
             mesh_name = self.model.mesh(i).name
             geom_ids = get_geom_ids_using_mesh(self.model, mesh_name)
             geom_names = [self.model.geom(i).name for i in geom_ids]
+            mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
+            mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
             
             # preprocessing the valid meshes
-            print(mesh_name)
+            print(mesh_name, geom_ids, geom_names, mesh_ids, mesh_names)
+            
+            # skip the meshes that are not able to acts as a contact surface
+            if self._skip_mesh(mesh_name):
+                continue
+            
             if mesh_name in feasible_region_idxes.keys():
                 faces_ = []
                 print("================", mesh_name, "================")
@@ -182,16 +210,11 @@ class MeshSampler:
                 print(f"Number of faces before: {len(faces)}")
                 faces = np.array(faces_)
         
-            # skip the meshes that are not able to acts as a contact surface
-            if mesh_name == "band" or mesh_name == "kuka":
-                continue
-        
             data_dict_mesh_i = {}
             for face_i in range(len(faces)):
                 face = faces[face_i]
                 face_vertices = vertices[face]
                 face_vertices_list.append(face_vertices)
-                
                 for i_ in range(3):
                     vis_face_list.append(face_vertices[i_])
                 A, B, C = face_vertices[0], face_vertices[1], face_vertices[2]
@@ -215,15 +238,22 @@ class MeshSampler:
             data_dict_mesh_i["num_vertices"] = v_count
             data_dict_mesh_i["geom_names"] = geom_names
             data_dict_mesh_i["geom_ids"] = geom_ids
+            data_dict_mesh_i["mesh_ids"] = mesh_ids
+            data_dict_mesh_i["mesh_names"] = mesh_names
             data_dict_mesh_i["vis_face_list_jax"] = jnp.array(vis_face_list)
             data_dict_mesh_i["normal_list_jax"] = jnp.array(normal_list)
             data_dict_mesh_i["face_center_list_jax"] = jnp.array(face_center_list)
             data_dict_mesh_i["rot_mat_list_jax"] = jnp.array(rot_mat_list)
             data_dict_mesh_i["face_vertices_list_jax"] = jnp.array(face_vertices_list)
             self.data_dict[mesh_name] = data_dict_mesh_i
-            
+            record_mesh_names.append(mesh_name)
+
             if mesh_name in feasible_region_idxes.keys():
                 global_geom_ids.extend(geom_ids * len(face_center_list))
+                global_mesh_ids.extend(mesh_ids * len(face_center_list)) # Note that all mesh_ids is is 
+                                                                         # a list with only one element,
+                                                                         # if the robot changes, we need to check
+                global_mesh_names.extend(mesh_names * len(face_center_list))
                 global_normal_list.extend(normal_list)
                 global_face_center_list.extend(face_center_list)
                 global_face_vertices_list.extend(face_vertices_list)
@@ -234,10 +264,11 @@ class MeshSampler:
                 globalid2linkname.extend([linkname] * len(face_center_list))
                 globalid2geomname.extend(geom_names * len(face_center_list))
                 globalid2localid.extend(list(range(len(face_center_list))))
-
                 global_num_samples.append(len(face_center_list))
         # Convert lists to numpy arrays
         global_geom_ids = np.array(global_geom_ids)
+        global_mesh_ids = np.array(global_mesh_ids)
+        global_mesh_names = np.array(global_mesh_names)
         global_normal_list = np.array(global_normal_list)
         global_face_center_list = np.array(global_face_center_list)
         global_face_vertices_list = np.array(global_face_vertices_list)
@@ -246,6 +277,7 @@ class MeshSampler:
         
         # Convert numpy arrays to JAX arrays
         global_geom_ids_jax = jnp.array(global_geom_ids)
+        global_mesh_ids_jax = jnp.array(global_mesh_ids)
         global_normal_list_jax = jnp.array(global_normal_list)
         global_face_center_list_jax = jnp.array(global_face_center_list)
         global_face_vertices_list_jax = jnp.array(global_face_vertices_list)
@@ -261,14 +293,23 @@ class MeshSampler:
         global_starting_indices = jnp.concatenate((jnp.array([0]), global_starting_indices))
         global_start_end_indices = jnp.stack((global_starting_indices, jnp.cumsum(global_num_samples)), axis=1)
         
+        # check the data_dict
+        assert len(global_start_end_indices) == len(record_mesh_names), f"Global: {len(global_start_end_indices)} and Recorded {len(record_mesh_names)} Mismatch in mesh names and start-end indices"
+        for i in range(len(record_mesh_names)):
+            mesh_name_ = record_mesh_names[i]
+            self.data_dict[mesh_name_]["global_start_end_indices"] = global_start_end_indices[i]
+        
         # Add global arrays to the data_dict
         self.data_dict["global_geom_ids"] = global_geom_ids
+        self.data_dict["global_mesh_ids"] = global_mesh_ids
+        self.data_dict["global_mesh_names"] = global_mesh_names
         self.data_dict["global_normal_list"] = global_normal_list
         self.data_dict["global_face_center_list"] = global_face_center_list
         self.data_dict["global_face_vertices_list"] = global_face_vertices_list
         self.data_dict["global_rot_mat_list"] = global_rot_mat_list
         self.data_dict["global_vis_face_list"] = global_vis_face_list
         self.data_dict["global_geom_ids_jax"] = global_geom_ids_jax
+        self.data_dict["global_mesh_ids_jax"] = global_mesh_ids_jax
         self.data_dict["global_normal_list_jax"] = global_normal_list_jax
         self.data_dict["global_face_center_list_jax"] = global_face_center_list_jax
         self.data_dict["global_face_vertices_list_jax"] = global_face_vertices_list_jax
@@ -281,9 +322,11 @@ class MeshSampler:
         self.data_dict["global_start_end_indices"] = global_start_end_indices
             
         # Generate a mapping from body names to mesh and geom names
+        # TODO: Check the geometric id and mesh id for the whole dataset
+        # a single body can include multiple meshes, so we need to account for that
         body_names = [self.model.body(i).name for i in range(self.model.nbody) if "link" in self.model.body(i).name]
         body_names_mapping = {}
-        mesh_names_mapping = {}
+        # mesh_names_mapping = {}
         for body_name in body_names:
             body_id = self.model.body(body_name).id
             geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
@@ -292,31 +335,35 @@ class MeshSampler:
             mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
             mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
             if len(mesh_names) == 0:
-                raise ValueError(f"No meshes found for body '{body_name}'")     
-            mesh_name = mesh_names[0]        
-            mesh_id = mesh_ids[0]
-            geom_id = geom_ids[0]    
+                raise ValueError(f"No meshes found for body '{body_name}'")    
+            # mesh_name = mesh_names
+            geom_names = [self.model.geom(i).name for i in geom_ids]
             
+            # Remove the kuka, and band meshes
+            if body_name == "link3" or body_name == "link5":
+                mesh_names = [mesh_names[0]]
+                mesh_ids = [mesh_ids[0]]
+                geom_ids = [geom_ids[0]]
+
             body_names_mapping[body_name] = {
-                "mesh_name": mesh_name,
-                "mesh_id": mesh_id,
-                "geom_id": geom_id,
-                "mesh_names": mesh_names,
-                "mesh_ids": mesh_ids,
-                "geom_names": self.data_dict[mesh_name]["geom_names"],
-                "geom_ids": self.data_dict[mesh_name]["geom_ids"]
+                "mesh_name": mesh_names,
+                "mesh_id": mesh_ids,
+                "geom_id": geom_ids,
+                # "mesh_names": mesh_names,
+                # "mesh_ids": mesh_ids,
+                # "geom_names": geom_names,
+                # "geom_ids": geom_id
             }
             
-            mesh_names_mapping[mesh_name] = body_name
+            # mesh_names_mapping[mesh_name] = body_name
         self.data_dict["body_names_mapping"] = body_names_mapping
-        self.data_dict["mesh_names_mapping"] = mesh_names_mapping
+        # self.data_dict["mesh_names_mapping"] = mesh_names_mapping
 
         xml_path = (Path(__file__).resolve().parent / ".." / f"{self.robot_name}/mesh_data").as_posix()
         file_name = f"{xml_path}/mesh_data_dict.npy"
         np.save(file_name, self.data_dict)
         print(f"Mesh data saved to {file_name}")
-        
-    # TODO: return link name and local index for faces    
+
     def global2local_id(self, global_ids: jnp.ndarray):
         mapping = self.data_dict["globalid2localid"]
         return slice_with_indices(mapping, global_ids)
@@ -329,17 +376,34 @@ class MeshSampler:
         mapping = self.data_dict["globalid2geomname"]
         return mapping[global_ids]
             
-    def visualize_mesh(self, mesh_id: int, faces_start: int = 10, faces_end: int = -1):
-        v_start = self.model.mesh_vertadr[mesh_id]
-        v_count = self.model.mesh_vertnum[mesh_id]
-        vertices = self.model.mesh_vert[v_start : v_start+v_count].reshape(-1, 3)
+    def check_degenerate_faces(self, vertices, faces):
+        degenerate_faces = []
         
-        f_start = self.model.mesh_faceadr[mesh_id]
-        f_count = self.model.mesh_facenum[mesh_id]
-        faces = self.model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
+        for i, face in enumerate(faces):
+            # Check for duplicate vertices in face
+            if len(set(face)) < 3:
+                degenerate_faces.append(i)
+                continue
+                
+            # Check for zero-area triangles
+            v0, v1, v2 = vertices[face]
+            edge1 = v1 - v0
+            edge2 = v2 - v0
+            cross = np.cross(edge1, edge2)
+            area = np.linalg.norm(cross) / 2
+            
+            if area < 1e-8:  # Very small area threshold
+                degenerate_faces.append(i)
+        
+        return degenerate_faces
+
+    def visualize_mesh(self, vertices: np.ndarray, faces: np.ndarray, faces_start: int = 10, faces_end: int = -1):
+        degenerate_faces = self.check_degenerate_faces(vertices, faces)
+        print(f"Degenerate faces: {len(degenerate_faces)}")
+        
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         faces = faces[faces_start:faces_end] if faces_end != -1 else faces[faces_start:]
-
+        print(faces.shape)
         for face_i in range(len(faces)):
             face = faces[face_i]
             face_vertices = vertices[face]
@@ -347,7 +411,22 @@ class MeshSampler:
             face_mesh.visual.vertex_colors = [0, 255, 0, 255]  # Green color
             mesh += face_mesh    
         mesh.show()
-    
+
+    def visualize_mesh_indexes(self, vertices: np.ndarray, faces: np.ndarray, faces_indexes: np.ndarray = None):
+        print(vertices.shape, faces.shape, "SHAPE")
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        
+        if faces_indexes is None:
+            faces_indexes = np.arange(len(faces))
+        
+        for face_i in faces_indexes:
+            face = faces[face_i]
+            face_vertices = vertices[face]
+            face_mesh = trimesh.Trimesh(vertices=face_vertices, faces=[[0, 1, 2]], process=False)
+            face_mesh.visual.vertex_colors = [0, 255, 0, 255]
+            mesh += face_mesh
+        mesh.show()
+
     def visualize_pos_sphere(self, mesh_id: int, geoms_pos_local: np.ndarray = None):
         radius = 0.004
         rgba = np.array([1.0, 0.0, 0.0, 1.0])
@@ -506,45 +585,18 @@ class MeshSampler:
             pos: Sampled position (3D vector).
             normal: Sampled normal vector (3D vector).
         """
-        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
-        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
-        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
+        # TODO: add random indexing mechanism to deal with multiple meshes on the same body.
+        n_meshes = len(self.data_dict["body_names_mapping"][body_name]["mesh_name"])
+        if n_meshes > 1:
+            idx = np.random.randint(0, n_meshes)
+        else:
+            idx = 0
+        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"][idx]
+        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"][idx]
+        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"][idx]        
+        
         face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal_jax(mesh_name, num_samples, key)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
-
-    def update_sampling_space_jax(self, body_names: list):
-        mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
-        faces_center_list = []
-        normals_list = []
-        rot_mats_list = []
-        faces_vertices_list = []
-        sample_nums = []
-        for mesh_name in mesh_names:
-            mesh_data = self.data_dict[mesh_name]
-            face_center_list = mesh_data["face_center_list_jax"]
-            normal_list = mesh_data["normal_list_jax"]
-            rot_mat_list = mesh_data["rot_mat_list_jax"]
-            face_vertices_list = mesh_data["face_vertices_list_jax"]
-            faces_center_list.append(face_center_list)
-            normals_list.append(normal_list)
-            rot_mats_list.append(rot_mat_list)
-            faces_vertices_list.append(face_vertices_list)
-            sample_nums.append(len(face_center_list))
-        
-        # Concatenate the lists
-        face_center_list = jnp.concatenate(faces_center_list, axis=0)
-        normal_list = jnp.concatenate(normals_list, axis=0)
-        rot_mat_list = jnp.concatenate(rot_mats_list, axis=0)
-        face_vertices_list = jnp.concatenate(faces_vertices_list, axis=0)
-        
-        # Update parameter as search space
-        self.data_dict["search_space"] = {
-            "face_center_list": face_center_list,
-            "normal_list": normal_list,
-            "rot_mat_list": rot_mat_list,
-            "face_vertices_list": face_vertices_list,
-            "sample_nums": jnp.array(sample_nums),
-        }
 
     def update_sampling_space_global(self, body_names: list):
         """
@@ -554,11 +606,18 @@ class MeshSampler:
         self.feasible_idxes = feasible_idxes
 
     def compute_feasible_idxes(self, body_names: list):
-        body_ids = [_link_names_.index(body_name) for body_name in body_names]
+        # find the corresponding mesh names
+        mesh_names = []
+        for body_name in body_names:
+            if body_name not in self.data_dict["body_names_mapping"]:
+                raise ValueError(f"Body name '{body_name}' not found in the data dictionary.")
+            mesh_names.extend(self.data_dict["body_names_mapping"][body_name]["mesh_names"])
+    
         feasible_idxes = []
-        for body_id in body_ids:
-            start = self.data_dict["global_start_end_indices"][body_id][0]
-            end = self.data_dict["global_start_end_indices"][body_id][1]
+        for mesh_name in mesh_names:
+            # TODO: retreive mesh ids corresponding to the body_id
+            start = self.data_dict[mesh_name]["global_start_end_indices"][0]
+            end = self.data_dict[mesh_name]["global_start_end_indices"][1]
             feasible_idxes.extend(jnp.arange(start, end).tolist())
         feasible_idxes = jnp.array(feasible_idxes)
         return feasible_idxes
@@ -582,11 +641,11 @@ class MeshSampler:
         idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
         return idxes
     
-    def sample_indexes_global_from_body(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-        body_names = [body_name]
-        feasible_idxes = self.compute_feasible_idxes(body_names)
-        idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
-        return idxes
+    # def sample_indexes_global_from_body(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+    #     body_names = [body_name]
+    #     feasible_idxes = self.compute_feasible_idxes(body_names)
+    #     idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
+    #     return idxes
     
     def get_data(self, global_idxs: jnp.ndarray):
         """
@@ -598,7 +657,10 @@ class MeshSampler:
         face_vertices_list = slice_with_indices(self.data_dict["global_face_vertices_list_jax"], global_idxs)
         geom_ids = slice_with_indices(self.data_dict["global_geom_ids"], global_idxs)
         link_names = self.global2link_name(global_idxs)
-        mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        
+        # TODO: use the global list to get mesh ids instead of the mapping! Note that link2, link4 and link6 has two meshes
+        # mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        mesh_ids = slice_with_indices(self.data_dict["global_mesh_ids"], global_idxs)
         return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
         
     def get_data_numpy(self, global_idxs: np.ndarray):
@@ -611,102 +673,63 @@ class MeshSampler:
         face_vertices_list = self.data_dict["global_face_vertices_list"][global_idxs]
         geom_ids = self.data_dict["global_geom_ids"][global_idxs]
         link_names = self.global2link_name(global_idxs)
-        mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        
+        # TODO: use the global list to get mesh ids instead of the mapping! Note that link2, link4 and link6 has two meshes
+        # mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
+        mesh_ids = self.data_dict["global_mesh_ids"][global_idxs]
         return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
         
-    # def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
+    # def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
     #     """
-    #     Get the data corresponding to the link names and local indices.
+    #     Sample a position and normal vector from the mesh using JAX.
         
     #     Args:
-    #         link_names: List of link names to get data for.
-    #         local_idxes: Local indices corresponding to the link names.
+    #         mesh_name: List of the mesh names to sample from.
         
     #     Returns:
-    #         face_center_list: Sampled positions (3D vectors).
-    #         normal_list: Sampled normal vectors (3D vectors).
-    #         rot_mat_list: Rotation matrices for the sampled normals.
-    #         face_vertices_list: Vertices of the sampled faces.
-    #         geom_ids: Geometric IDs corresponding to the sampled faces.
+    #         pos: Sampled position (3D vector).
+    #         normal: Sampled normal vector (3D vector).
     #     """
-    #     link_names_mapping = self.data_dict["mesh_names_mapping"]
-    #     face_center_list = []
-    #     normal_list = []
-    #     rot_mat_list = []
-    #     face_vertices_list = []
-    #     geom_ids = []
-    #     for link_name, local_idx in zip(link_names, local_idxes):
-    #         mesh_name = link_names_mapping[link_name]
-    #         mesh_data = self.data_dict[mesh_name]
-    #         face_center_list.append(mesh_data["face_center_list_jax"][local_idx])
-    #         normal_list.append(mesh_data["normal_list_jax"][local_idx])
-    #         rot_mat_list.append(mesh_data["rot_mat_list_jax"][local_idx])
-    #         face_vertices_list.append(mesh_data["face_vertices_list_jax"][local_idx])
-    #         geom_ids.append(mesh_data["geom_ids"][local_idx])
-    #     return np.array(face_center_list), np.array(normal_list), np.array(rot_mat_list), \
-    #             np.array(face_vertices_list), np.array(geom_ids)
-        
-    def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
-        link_name_ids = []
-        for link_name in link_names:
-            link_name_ids.append(_link_names_.index(link_name))
-        
-        starting_indices = self.data_dict["global_start_end_indices"][link_name_ids, 0]
-        global_idxs = starting_indices + local_idxes
-        face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids = self.get_data(global_idxs)
-        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids
-        
-    def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-        """
-        Sample a position and normal vector from the mesh using JAX.
-        
-        Args:
-            mesh_name: List of the mesh names to sample from.
-        
-        Returns:
-            pos: Sampled position (3D vector).
-            normal: Sampled normal vector (3D vector).
-        """
-        face_center_list = self.data_dict["search_space"]["face_center_list"]
-        normal_list = self.data_dict["search_space"]["normal_list"]
-        rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
-        face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
-        sample_nums = self.data_dict["search_space"]["sample_nums"]
+    #     face_center_list = self.data_dict["search_space"]["face_center_list"]
+    #     normal_list = self.data_dict["search_space"]["normal_list"]
+    #     rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
+    #     face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
+    #     sample_nums = self.data_dict["search_space"]["sample_nums"]
 
-        # Sample indices
-        idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
+    #     # Sample indices
+    #     idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
         
-        # Get the link names corresponding to the sampled indices
-        link_names = [self.data_dict["mesh_names_mapping"][mesh_name] for mesh_name in mesh_names]
-        randomized_link_names = assign_indices_to_names(jnp.array(sample_nums), idxs, link_names)
-        randomized_link_names = np.array(randomized_link_names)
+    #     # Get the link names corresponding to the sampled indices
+    #     link_names = [self.data_dict["mesh_names_mapping"][mesh_name] for mesh_name in mesh_names]
+    #     randomized_link_names = assign_indices_to_names(jnp.array(sample_nums), idxs, link_names)
+    #     randomized_link_names = np.array(randomized_link_names)
         
-        # Select sampled data
-        face_center_select = face_center_list[idxs]
-        normal_select = normal_list[idxs]
-        rot_mat_select = rot_mat_list[idxs]
-        face_vertices_select = face_vertices_list[idxs]
-        mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in randomized_link_names])
-        geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
+    #     # Select sampled data
+    #     face_center_select = face_center_list[idxs]
+    #     normal_select = normal_list[idxs]
+    #     rot_mat_select = rot_mat_list[idxs]
+    #     face_vertices_select = face_vertices_list[idxs]
+    #     mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in randomized_link_names])
+    #     geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
         
-        return face_center_select, normal_select, rot_mat_select, face_vertices_select, randomized_link_names, \
-               mesh_ids, geom_ids
+    #     return face_center_select, normal_select, rot_mat_select, face_vertices_select, randomized_link_names, \
+    #            mesh_ids, geom_ids
 
-    def sample_bodies_pos_normal_jax(self, body_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-        """
-        Sample a position and normal vector from the body using JAX.
+    # def sample_bodies_pos_normal_jax(self, body_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+    #     """
+    #     Sample a position and normal vector from the body using JAX.
         
-        Args:
-            body_name: List of the body names to sample from.
+    #     Args:
+    #         body_name: List of the body names to sample from.
         
-        Returns:
-            pos: Sampled position (3D vector).
-            normal: Sampled normal vector (3D vector).
-        """
-        mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
-        face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names, mesh_ids, geom_ids \
-        = self.sample_poss_normal_jax(mesh_names, num_samples, key)
-        return mesh_ids, geom_ids, face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names
+    #     Returns:
+    #         pos: Sampled position (3D vector).
+    #         normal: Sampled normal vector (3D vector).
+    #     """
+    #     mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
+    #     face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names, mesh_ids, geom_ids \
+    #     = self.sample_poss_normal_jax(mesh_names, num_samples, key)
+    #     return mesh_ids, geom_ids, face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names
 
     def sample_indexes(self, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
@@ -732,9 +755,16 @@ class MeshSampler:
             pos: Sampled position (3D vector).
             normal: Sampled normal vector (3D vector).
         """
-        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"]
-        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"]
-        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"]
+        # TODO: deal with the link2, link4, link6 for the multiple meshes case
+        # Need test!
+        n_mesh = len(self.data_dict["body_names_mapping"][body_name]["mesh_name"])
+        if n_mesh > 1:
+            idx = np.random.randint(0, n_mesh)
+        else:
+            idx = 0
+        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"][idx]
+        mesh_id = self.data_dict["body_names_mapping"][body_name]["mesh_id"][idx]
+        geom_id = self.data_dict["body_names_mapping"][body_name]["geom_id"][idx]
         face_center_select, normal_select, rot_mat_select, face_vertices_select = self.sample_pos_normal(mesh_name, num_samples)
         return mesh_id, geom_id, face_center_select, normal_select, rot_mat_select, face_vertices_select
         
@@ -799,8 +829,6 @@ class MeshSampler:
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
             jacobian_bodies.append(jac_body)
-            # print(jac_site_contact.T @ ext_wrench - jac_body.T @ equi_ext_wrench) # Check the euqivalent wrench is correct or not
-            # print(f"Iter {i}: ========================")
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
         
@@ -863,8 +891,6 @@ class MeshSampler:
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
             jacobian_bodies.append(jac_body)
-            # print(jac_site_contact.T @ ext_wrench - jac_body.T @ equi_ext_wrench) # Check the euqivalent wrench is correct or not
-            # print(f"Iter {i}: ========================")
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
     
@@ -876,78 +902,69 @@ class MeshSampler:
         self.model = model
         self.data = data
 
-    def retrieve_data_dict(self, body_name: str):
-        # body_id = self.model.body(body_name).id
-        # geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
-        # if len(geom_ids) == 0:
-        #     raise ValueError(f"No geoms found for body '{body_name}'")
-        # mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
-        # mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
-        # if len(mesh_names) == 0:
-        #     raise ValueError(f"No meshes found for body '{body_name}'")     
-        # mesh_name = mesh_names[0]  
-        mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"] 
-        data_dict = self.data_dict[mesh_name]
-        return data_dict
+    # def retrieve_data_dict(self, body_name: str):
+    #     mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"] 
+    #     data_dict = self.data_dict[mesh_name]
+    #     return data_dict
 
-    def compute_nearest_position(self, position: np.ndarray, sample_body_name: str):
-        """
-            Compute the nearest position on the mesh to the given position.
-        """
-        data_dict = self.retrieve_data_dict(sample_body_name)
-        faces_center_local = data_dict["face_center_list"]
+    # def compute_nearest_position(self, position: np.ndarray, sample_body_name: str):
+    #     """
+    #         Compute the nearest position on the mesh to the given position.
+    #     """
+    #     data_dict = self.retrieve_data_dict(sample_body_name)
+    #     faces_center_local = data_dict["face_center_list"]
         
-        # Compute the nearest position on the mesh to the given position
-        nearest_pos = None
-        min_dist = float("inf")
-        for i in range(len(faces_center_local)):
-            face_center = faces_center_local[i]
-            dist = np.linalg.norm(position - face_center)
-            if dist < min_dist:
-                min_dist = dist
-                nearest_pos = face_center
-        rot_mat_select = data_dict["rot_mat_list"][i]
-        face_vertices_select = data_dict["face_vertices_list"][i]
-        normal_select = data_dict["normal_list"][i]
-        return nearest_pos, normal_select, rot_mat_select, face_vertices_select
+    #     # Compute the nearest position on the mesh to the given position
+    #     nearest_pos = None
+    #     min_dist = float("inf")
+    #     for i in range(len(faces_center_local)):
+    #         face_center = faces_center_local[i]
+    #         dist = np.linalg.norm(position - face_center)
+    #         if dist < min_dist:
+    #             min_dist = dist
+    #             nearest_pos = face_center
+    #     rot_mat_select = data_dict["rot_mat_list"][i]
+    #     face_vertices_select = data_dict["face_vertices_list"][i]
+    #     normal_select = data_dict["normal_list"][i]
+    #     return nearest_pos, normal_select, rot_mat_select, face_vertices_select
     
-    def compute_nearest_positions(self, positions: np.ndarray, sample_body_name: str):
-        data_dict = self.retrieve_data_dict(sample_body_name)
-        faces_center_local = data_dict["face_center_list"]
-        indices = batchwise_nearest(positions, faces_center_local)
-        nearest_positions = faces_center_local[indices]
-        normals = data_dict["normal_list"][indices]
-        rot_mats = data_dict["rot_mat_list"][indices]
-        faces_vertices_select = data_dict["face_vertices_list"][indices]
-        return nearest_positions, normals, rot_mats, faces_vertices_select
+    # def compute_nearest_positions(self, positions: np.ndarray, sample_body_name: str):
+    #     data_dict = self.retrieve_data_dict(sample_body_name)
+    #     faces_center_local = data_dict["face_center_list"]
+    #     indices = batchwise_nearest(positions, faces_center_local)
+    #     nearest_positions = faces_center_local[indices]
+    #     normals = data_dict["normal_list"][indices]
+    #     rot_mats = data_dict["rot_mat_list"][indices]
+    #     faces_vertices_select = data_dict["face_vertices_list"][indices]
+    #     return nearest_positions, normals, rot_mats, faces_vertices_select
     
-    def compute_nearest_positions_jax(self, positions: jnp.ndarray, sample_body_name: str):
-        data_dict = self.retrieve_data_dict(sample_body_name)
-        faces_center_local = data_dict["face_center_list_jax"]
-        indices = batchwise_nearest_jax(positions, faces_center_local)
-        nearest_positions = slice_with_indices(faces_center_local, indices)
-        normals = slice_with_indices(data_dict["normal_list_jax"], indices)
-        rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
-        faces_vertices_select = slice_with_indices(data_dict["face_vertices_list_jax"], indices)
-        return nearest_positions, normals, rot_mats, faces_vertices_select
+    # def compute_nearest_positions_jax(self, positions: jnp.ndarray, sample_body_name: str):
+    #     data_dict = self.retrieve_data_dict(sample_body_name)
+    #     faces_center_local = data_dict["face_center_list_jax"]
+    #     indices = batchwise_nearest_jax(positions, faces_center_local)
+    #     nearest_positions = slice_with_indices(faces_center_local, indices)
+    #     normals = slice_with_indices(data_dict["normal_list_jax"], indices)
+    #     rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
+    #     faces_vertices_select = slice_with_indices(data_dict["face_vertices_list_jax"], indices)
+    #     return nearest_positions, normals, rot_mats, faces_vertices_select
         
-    def compute_nearest_positions_bodies_jax(self, positions: jnp.ndarray, body_names: list):
-        faces_center_local = self.data_dict["search_space"]["face_center_list"]
-        normal_list = self.data_dict["search_space"]["normal_list"]
-        rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
-        face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
-        sample_nums = self.data_dict["search_space"]["sample_nums"]
+    # def compute_nearest_positions_bodies_jax(self, positions: jnp.ndarray, body_names: list):
+    #     faces_center_local = self.data_dict["search_space"]["face_center_list"]
+    #     normal_list = self.data_dict["search_space"]["normal_list"]
+    #     rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
+    #     face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
+    #     sample_nums = self.data_dict["search_space"]["sample_nums"]
         
-        indices = batchwise_nearest_jax(positions, faces_center_local)
-        nearest_positions = slice_with_indices(faces_center_local, indices)
-        normals = slice_with_indices(normal_list, indices)
-        rot_mats = slice_with_indices(rot_mat_list, indices)
-        faces_vertices_select = slice_with_indices(face_vertices_list, indices)
+    #     indices = batchwise_nearest_jax(positions, faces_center_local)
+    #     nearest_positions = slice_with_indices(faces_center_local, indices)
+    #     normals = slice_with_indices(normal_list, indices)
+    #     rot_mats = slice_with_indices(rot_mat_list, indices)
+    #     faces_vertices_select = slice_with_indices(face_vertices_list, indices)
         
-        # Get the link names corresponding to the sampled indices
-        randomized_link_names = assign_indices_to_names(sample_nums, indices, body_names)
-        randomized_geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
-        return nearest_positions, normals, rot_mats, faces_vertices_select, randomized_geom_ids, randomized_link_names
+    #     # Get the link names corresponding to the sampled indices
+    #     randomized_link_names = assign_indices_to_names(sample_nums, indices, body_names)
+    #     randomized_geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
+    #     return nearest_positions, normals, rot_mats, faces_vertices_select, randomized_geom_ids, randomized_link_names
         
     def find_nearest_indexes(self, positions: jnp.ndarray, body_names: list):
         """
@@ -971,6 +988,95 @@ class MeshSampler:
         nearest_indexes = feasible_idxes[indices]
         return nearest_indexes
         
+from collections import defaultdict
+"""
+Code refer to 
+https://stackoverflow.com/questions/76435070/how-do-i-use-python-trimesh-to-get-boundary-vertex-indices
+"""
+def boundary(mesh, close_paths=True):   
+    # Set of all edges and of boundary edges (those that appear only once).
+    edge_set = set()
+    boundary_edges = set()
+    edge_to_faces = defaultdict(list)  # Maps edge to faces that contain it
+
+    # Build edge-to-face mapping
+    for face_idx, face in enumerate(mesh.faces):
+        # Get edges of this face
+        edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+        for edge in edges:
+            # Sort edge to ensure consistent ordering
+            sorted_edge = tuple(sorted(edge))
+            edge_to_faces[sorted_edge].append(face_idx)
+
+    # Iterate over all edges, as tuples in the form (i, j) (sorted with i < j to remove ambiguities).
+    for e in map(tuple, mesh.edges_sorted):
+        if e not in edge_set:
+            edge_set.add(e)
+            boundary_edges.add(e)
+        elif e in boundary_edges:
+            boundary_edges.remove(e)
+        else:
+            raise RuntimeError(f"The mesh is not a manifold: edge {e} appears more than twice.")
+
+    # Given all boundary vertices, we create a simple dictionary that tells who are their neighbours.
+    neighbours = defaultdict(lambda: [])
+    for v1, v2 in boundary_edges:
+        neighbours[v1].append(v2)
+        neighbours[v2].append(v1)
+
+    # We now look for all boundary paths by "extracting" one loop at a time.
+    boundary_paths = []
+    boundary_indices = []
+    boundary_face_indices = []
+
+    while len(boundary_edges) > 0:
+        # Given the set of remaining boundary edges, get one of them and use it to start the current boundary path.
+        v_previous, v_current = next(iter(boundary_edges))
+        boundary_vertices = [v_previous]
+        boundary_faces = []
+
+        # Keep iterating until we close the current boundary curve
+        while v_current != boundary_vertices[0]:
+            # We grow the path by adding the vertex "v_current".
+            boundary_vertices.append(v_current)
+
+            # Find faces adjacent to this boundary edge
+            edge = tuple(sorted([v_previous, v_current]))
+            adjacent_faces = edge_to_faces.get(edge, [])
+            boundary_faces.extend(adjacent_faces)
+
+            # We now check which is the next vertex to visit.
+            v1, v2 = neighbours[v_current]
+            if v1 != v_previous:
+                v_current, v_previous = v1, v_current
+            elif v2 != v_previous:
+                v_current, v_previous = v2, v_current
+            else:
+                raise RuntimeError(f"Next vertices to visit ({v1=}, {v2=}) are both equal to {v_previous=}.")
+
+        # Handle the closing edge
+        if len(boundary_vertices) > 1:
+            edge = tuple(sorted([boundary_vertices[-1], boundary_vertices[0]]))
+            adjacent_faces = edge_to_faces.get(edge, [])
+            boundary_faces.extend(adjacent_faces)
+
+        # Close the path (by repeating the first vertex) if needed.
+        if close_paths:
+            boundary_vertices.append(boundary_vertices[0])
+
+        # Store the vertex indices and face indices before converting to coordinates
+        boundary_indices.append(boundary_vertices.copy())
+        boundary_face_indices.append(list(set(boundary_faces)))  # Remove duplicates
+
+        # "Convert" the vertices from indices to actual Cartesian coordinates.
+        boundary_paths.append(mesh.vertices[boundary_vertices])
+
+        # Remove all boundary edges that were added to the last path.
+        boundary_edges = set(e for e in boundary_edges if e[0] not in boundary_vertices)
+
+    # Return the list of boundary paths, vertex indices, and face indices.
+    return boundary_paths, boundary_indices, boundary_face_indices
+        
 if __name__ == "__main__":
     # Example usage
     robot_name = "kuka_iiwa_14"
@@ -978,14 +1084,59 @@ if __name__ == "__main__":
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
-    # vis_mesh_body_name = "link1"
-    # print(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
-    # mesh_id = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_id"]
-    # mesh_sampler.visualize_mesh(mesh_id=mesh_id, faces_start=8120, faces_end=8450)
-    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link7", num_samples=5)
-    print(faces_center_local)
+    vis_mesh_body_name = "link6"
+    n_mesh = len(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
+    if n_mesh > 1:
+        idx = np.random.randint(0, n_mesh)
+    else:
+        idx = 0
+    print(n_mesh, "NMESH")
+    mesh_id = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_id"][0]
+    mesh_name = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"][0]
+
+    # visualize mesh
+    v_start = model.mesh_vertadr[mesh_id]
+    v_count = model.mesh_vertnum[mesh_id]
+    vertices = model.mesh_vert[v_start : v_start+v_count].reshape(-1, 3)
+    
+    f_start = model.mesh_faceadr[mesh_id]
+    f_count = model.mesh_facenum[mesh_id]
+    faces = model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    mesh.export(f"./blender/{mesh_name}_mujoco_cached.obj")
+    exit(0)
+    
+    mesh_sampler.visualize_mesh(vertices=vertices, faces=faces, faces_start=0, faces_end=800)
+    indexes = []
+    for feasible_region in feasible_region_idxes[mesh_name]:
+        start, end = feasible_region
+        if end != -1:
+            indexes.extend(np.arange(start, end).tolist())
+        else:
+            indexes.extend(np.arange(start, f_count).tolist())
+    mesh_sampler.visualize_mesh_indexes(vertices=vertices, faces=faces, faces_indexes=indexes)
+
+    mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
     
-    # 0, -1
-    # 675, 5979; 6236, -1
-    # 400, 1000; 1000, 8120; 8451, -1; 
+    # v_start = model.mesh_vertadr[mesh_id]
+    # v_count = model.mesh_vertnum[mesh_id]
+    # vertices = model.mesh_vert[v_start : v_start+v_count].reshape(-1, 3)
+    # f_start = model.mesh_faceadr[mesh_id]
+    # f_count = model.mesh_facenum[mesh_id]
+    # faces = model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
+    # mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    # boundary_path, boundary_indices, boundary_face_indices = boundary(mesh)
+    # print(len(boundary_path), len(boundary_indices), len(boundary_face_indices))
+    # if len(boundary_face_indices) == 0:
+    #     print("No boundary faces found.")
+    # else:
+    #     boundary_face_indices = np.array(boundary_face_indices[0])
+    #     mesh_sampler.visualize_mesh_indexes(mesh_id=mesh_id, faces_indexes=boundary_face_indices)
+    #     # save the boundary face indices
+    #     mesh_name = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"]
+    #     # np.save(f"{mesh_name}_boundary_face_indices.npy", boundary_face_indices)
+    
+    # # remove [800, 1311], not visualizable [0, 799], remove [2148, 2220], [2445, 2680], [2841, 3029], [3834, 4022]
+    # # feasible region, [1311, 2148], [2220, 2445], [2680, 2841], [3029, 3834], [4022, -1]
+    # # boundary region, [2220, 2445], [2680, 2841], [3029, 3834]
