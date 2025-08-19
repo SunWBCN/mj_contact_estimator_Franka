@@ -5,6 +5,7 @@ import trimesh
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
+import os
 import jax
 from jax import numpy as jnp
 jax.config.update("jax_enable_x64", True)
@@ -87,19 +88,6 @@ def assign_indices_to_names(lengths: jnp.ndarray, indices: jnp.ndarray, names: L
     assigned_names = [names[int(seg_id)] for seg_id in segment_ids]
     return assigned_names
 
-feasible_region_idxes = {"link_7": [[220, 357], [988, -1]], 
-                         "link_6_grey": [[1311, 2148], [2220, 2445], [2680, 2841], [3029, 3834], [4022, -1]],
-                         "link_6_orange": [[0, -1]], 
-                         "link_5": [[800, 1800], [2000, -1]], 
-                         "link_4_grey": [[0, -1]], 
-                         "link_4_orange": [[0, -1]],
-                         "link_3": [[675, 5979], [6236, -1]], 
-                         "link_2_grey": [[0, -1]], 
-                         "link_2_orange": [[0, -1]],
-                         "link_1": [[400, 1000], [1000, 8120], [8451, -1]]}
-cross_link_region_idxes = {"link_7": [[220, 357]],
-                           "link_6_grey": [[2220, 2445], [2680, 2841], [3029, 3834]],
-                           }
 mesh_names_2_body_names = {
     "link_7": "link7",
     "link_6_orange": "link6",
@@ -113,8 +101,6 @@ mesh_names_2_body_names = {
     "link_1": "link1"
 }   
 # _link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
-# _mesh_names_ = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
-#                 "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
 
 class MeshSampler:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, init_mesh_data: bool = True, robot_name: str = "kuka_iiwa_14"):
@@ -124,6 +110,7 @@ class MeshSampler:
         self.geom_names = [model.geom(i).name for i in range(model.ngeom)]
         # self.mesh_id 
         self.robot_name = robot_name
+        self._load_feasible_region(robot_name)
         if init_mesh_data:
             self._init_mesh_data()
         else:
@@ -133,6 +120,24 @@ class MeshSampler:
             for mesh_name in self.mesh_names:
                 if mesh_name not in self.data_dict:
                     print(f"Mesh {mesh_name} not found in loaded data.")
+
+    def _load_feasible_region(self, robot_name: str = "kuka_iiwa_14"):
+        """
+        Load feasible region indices for each mesh.
+        """
+        index_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
+        if robot_name == "kuka_iiwa_14":
+            feasible_mesh_names = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
+                    "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
+            self.feasible_region_idxes = {}
+            for mesh_name in feasible_mesh_names:
+                file_name = f"{index_path}/{mesh_name}_valid_face_indices.npy"
+                if os.path.exists(file_name):
+                    self.feasible_region_idxes[mesh_name] = np.load(f"{index_path}/{mesh_name}_valid_face_indices.npy")
+                else:
+                    self.feasible_region_idxes[mesh_name] = [0, -1]
+        else:
+            raise NotImplementedError(f"Robot {robot_name} not implemented for loading feasible regions.")
 
     def _skip_mesh(self, mesh_name: str) -> bool:
         """
@@ -196,20 +201,16 @@ class MeshSampler:
             if self._skip_mesh(mesh_name):
                 continue
             
-            if mesh_name in feasible_region_idxes.keys():
-                faces_ = []
+            if mesh_name in self.feasible_region_idxes.keys():
+                indexes = self.feasible_region_idxes[mesh_name]
+                if indexes[0] == 0 and indexes[1] == -1:
+                    faces_ = faces
+                else:
+                    faces_ = faces[indexes]
                 print("================", mesh_name, "================")
-                for idxes in feasible_region_idxes[mesh_name]:
-                    start_idx = idxes[0]
-                    end_idx = idxes[1]
-                    if end_idx == -1:
-                        faces_.extend(faces[start_idx:])
-                    else:
-                        faces_.extend(faces[start_idx:end_idx])
                 print(f"Number of faces: {len(faces_)}")
                 print(f"Number of faces before: {len(faces)}")
-                faces = np.array(faces_)
-        
+                        
             data_dict_mesh_i = {}
             for face_i in range(len(faces)):
                 face = faces[face_i]
@@ -248,7 +249,7 @@ class MeshSampler:
             self.data_dict[mesh_name] = data_dict_mesh_i
             record_mesh_names.append(mesh_name)
 
-            if mesh_name in feasible_region_idxes.keys():
+            if mesh_name in self.feasible_region_idxes.keys():
                 global_geom_ids.extend(geom_ids * len(face_center_list))
                 global_mesh_ids.extend(mesh_ids * len(face_center_list)) # Note that all mesh_ids is is 
                                                                          # a list with only one element,
@@ -349,15 +350,8 @@ class MeshSampler:
                 "mesh_name": mesh_names,
                 "mesh_id": mesh_ids,
                 "geom_id": geom_ids,
-                # "mesh_names": mesh_names,
-                # "mesh_ids": mesh_ids,
-                # "geom_names": geom_names,
-                # "geom_ids": geom_id
             }
-            
-            # mesh_names_mapping[mesh_name] = body_name
         self.data_dict["body_names_mapping"] = body_names_mapping
-        # self.data_dict["mesh_names_mapping"] = mesh_names_mapping
 
         xml_path = (Path(__file__).resolve().parent / ".." / f"{self.robot_name}/mesh_data").as_posix()
         file_name = f"{xml_path}/mesh_data_dict.npy"
@@ -416,7 +410,7 @@ class MeshSampler:
         print(vertices.shape, faces.shape, "SHAPE")
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         
-        if faces_indexes is None:
+        if faces_indexes is None or faces_indexes == [0, -1]:
             faces_indexes = np.arange(len(faces))
         
         for face_i in faces_indexes:
@@ -611,7 +605,7 @@ class MeshSampler:
         for body_name in body_names:
             if body_name not in self.data_dict["body_names_mapping"]:
                 raise ValueError(f"Body name '{body_name}' not found in the data dictionary.")
-            mesh_names.extend(self.data_dict["body_names_mapping"][body_name]["mesh_names"])
+            mesh_names.extend(self.data_dict["body_names_mapping"][body_name]["mesh_name"])
     
         feasible_idxes = []
         for mesh_name in mesh_names:
@@ -641,11 +635,11 @@ class MeshSampler:
         idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
         return idxes
     
-    # def sample_indexes_global_from_body(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-    #     body_names = [body_name]
-    #     feasible_idxes = self.compute_feasible_idxes(body_names)
-    #     idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
-    #     return idxes
+    def sample_indexes_global_from_body(self, body_name: str, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
+        body_names = [body_name]
+        feasible_idxes = self.compute_feasible_idxes(body_names)
+        idxes = jax.random.choice(key, feasible_idxes, shape=(num_samples,), replace=False)
+        return idxes
     
     def get_data(self, global_idxs: jnp.ndarray):
         """
@@ -678,58 +672,6 @@ class MeshSampler:
         # mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
         mesh_ids = self.data_dict["global_mesh_ids"][global_idxs]
         return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids
-        
-    # def sample_poss_normal_jax(self, mesh_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-    #     """
-    #     Sample a position and normal vector from the mesh using JAX.
-        
-    #     Args:
-    #         mesh_name: List of the mesh names to sample from.
-        
-    #     Returns:
-    #         pos: Sampled position (3D vector).
-    #         normal: Sampled normal vector (3D vector).
-    #     """
-    #     face_center_list = self.data_dict["search_space"]["face_center_list"]
-    #     normal_list = self.data_dict["search_space"]["normal_list"]
-    #     rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
-    #     face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
-    #     sample_nums = self.data_dict["search_space"]["sample_nums"]
-
-    #     # Sample indices
-    #     idxs = jax.random.choice(key, len(face_center_list), shape=(num_samples,), replace=False)
-        
-    #     # Get the link names corresponding to the sampled indices
-    #     link_names = [self.data_dict["mesh_names_mapping"][mesh_name] for mesh_name in mesh_names]
-    #     randomized_link_names = assign_indices_to_names(jnp.array(sample_nums), idxs, link_names)
-    #     randomized_link_names = np.array(randomized_link_names)
-        
-    #     # Select sampled data
-    #     face_center_select = face_center_list[idxs]
-    #     normal_select = normal_list[idxs]
-    #     rot_mat_select = rot_mat_list[idxs]
-    #     face_vertices_select = face_vertices_list[idxs]
-    #     mesh_ids = jnp.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in randomized_link_names])
-    #     geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
-        
-    #     return face_center_select, normal_select, rot_mat_select, face_vertices_select, randomized_link_names, \
-    #            mesh_ids, geom_ids
-
-    # def sample_bodies_pos_normal_jax(self, body_names: list, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
-    #     """
-    #     Sample a position and normal vector from the body using JAX.
-        
-    #     Args:
-    #         body_name: List of the body names to sample from.
-        
-    #     Returns:
-    #         pos: Sampled position (3D vector).
-    #         normal: Sampled normal vector (3D vector).
-    #     """
-    #     mesh_names = [self.data_dict["body_names_mapping"][body_name]["mesh_name"] for body_name in body_names]
-    #     face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names, mesh_ids, geom_ids \
-    #     = self.sample_poss_normal_jax(mesh_names, num_samples, key)
-    #     return mesh_ids, geom_ids, face_center_select, normal_select, rot_mat_select, face_vertices_select, link_names
 
     def sample_indexes(self, num_samples: int = 3, key: jax.random.PRNGKey = jax.random.PRNGKey(0)):
         """
@@ -890,8 +832,7 @@ class MeshSampler:
             jacobian_contacts.append(jac_site_contact)    
             jac_body = np.zeros((6, model.nv))
             mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
-            jacobian_bodies.append(jac_body)
-            
+            jacobian_bodies.append(jac_body)            
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
     
     def update_model_data(self, model, data):
@@ -901,70 +842,6 @@ class MeshSampler:
         """
         self.model = model
         self.data = data
-
-    # def retrieve_data_dict(self, body_name: str):
-    #     mesh_name = self.data_dict["body_names_mapping"][body_name]["mesh_name"] 
-    #     data_dict = self.data_dict[mesh_name]
-    #     return data_dict
-
-    # def compute_nearest_position(self, position: np.ndarray, sample_body_name: str):
-    #     """
-    #         Compute the nearest position on the mesh to the given position.
-    #     """
-    #     data_dict = self.retrieve_data_dict(sample_body_name)
-    #     faces_center_local = data_dict["face_center_list"]
-        
-    #     # Compute the nearest position on the mesh to the given position
-    #     nearest_pos = None
-    #     min_dist = float("inf")
-    #     for i in range(len(faces_center_local)):
-    #         face_center = faces_center_local[i]
-    #         dist = np.linalg.norm(position - face_center)
-    #         if dist < min_dist:
-    #             min_dist = dist
-    #             nearest_pos = face_center
-    #     rot_mat_select = data_dict["rot_mat_list"][i]
-    #     face_vertices_select = data_dict["face_vertices_list"][i]
-    #     normal_select = data_dict["normal_list"][i]
-    #     return nearest_pos, normal_select, rot_mat_select, face_vertices_select
-    
-    # def compute_nearest_positions(self, positions: np.ndarray, sample_body_name: str):
-    #     data_dict = self.retrieve_data_dict(sample_body_name)
-    #     faces_center_local = data_dict["face_center_list"]
-    #     indices = batchwise_nearest(positions, faces_center_local)
-    #     nearest_positions = faces_center_local[indices]
-    #     normals = data_dict["normal_list"][indices]
-    #     rot_mats = data_dict["rot_mat_list"][indices]
-    #     faces_vertices_select = data_dict["face_vertices_list"][indices]
-    #     return nearest_positions, normals, rot_mats, faces_vertices_select
-    
-    # def compute_nearest_positions_jax(self, positions: jnp.ndarray, sample_body_name: str):
-    #     data_dict = self.retrieve_data_dict(sample_body_name)
-    #     faces_center_local = data_dict["face_center_list_jax"]
-    #     indices = batchwise_nearest_jax(positions, faces_center_local)
-    #     nearest_positions = slice_with_indices(faces_center_local, indices)
-    #     normals = slice_with_indices(data_dict["normal_list_jax"], indices)
-    #     rot_mats = slice_with_indices(data_dict["rot_mat_list_jax"], indices)
-    #     faces_vertices_select = slice_with_indices(data_dict["face_vertices_list_jax"], indices)
-    #     return nearest_positions, normals, rot_mats, faces_vertices_select
-        
-    # def compute_nearest_positions_bodies_jax(self, positions: jnp.ndarray, body_names: list):
-    #     faces_center_local = self.data_dict["search_space"]["face_center_list"]
-    #     normal_list = self.data_dict["search_space"]["normal_list"]
-    #     rot_mat_list = self.data_dict["search_space"]["rot_mat_list"]
-    #     face_vertices_list = self.data_dict["search_space"]["face_vertices_list"]
-    #     sample_nums = self.data_dict["search_space"]["sample_nums"]
-        
-    #     indices = batchwise_nearest_jax(positions, faces_center_local)
-    #     nearest_positions = slice_with_indices(faces_center_local, indices)
-    #     normals = slice_with_indices(normal_list, indices)
-    #     rot_mats = slice_with_indices(rot_mat_list, indices)
-    #     faces_vertices_select = slice_with_indices(face_vertices_list, indices)
-        
-    #     # Get the link names corresponding to the sampled indices
-    #     randomized_link_names = assign_indices_to_names(sample_nums, indices, body_names)
-    #     randomized_geom_ids = jnp.array([self.data_dict["body_names_mapping"][name]["geom_id"] for name in randomized_link_names])
-    #     return nearest_positions, normals, rot_mats, faces_vertices_select, randomized_geom_ids, randomized_link_names
         
     def find_nearest_indexes(self, positions: jnp.ndarray, body_names: list):
         """
@@ -1083,7 +960,7 @@ if __name__ == "__main__":
     xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/scene.xml").as_posix()
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
-    mesh_sampler = MeshSampler(model, data, init_mesh_data=False)
+    mesh_sampler = MeshSampler(model, data, init_mesh_data=True)
     vis_mesh_body_name = "link6"
     n_mesh = len(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
     if n_mesh > 1:
@@ -1102,41 +979,11 @@ if __name__ == "__main__":
     f_start = model.mesh_faceadr[mesh_id]
     f_count = model.mesh_facenum[mesh_id]
     faces = model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    mesh.export(f"./blender/{mesh_name}_mujoco_cached.obj")
-    exit(0)
     
     mesh_sampler.visualize_mesh(vertices=vertices, faces=faces, faces_start=0, faces_end=800)
-    indexes = []
-    for feasible_region in feasible_region_idxes[mesh_name]:
-        start, end = feasible_region
-        if end != -1:
-            indexes.extend(np.arange(start, end).tolist())
-        else:
-            indexes.extend(np.arange(start, f_count).tolist())
+    
+    indexes = mesh_sampler.feasible_region_idxes[mesh_name]
     mesh_sampler.visualize_mesh_indexes(vertices=vertices, faces=faces, faces_indexes=indexes)
 
     mesh_id, geom_id, faces_center_local, normals_local, rot_mats, face_vertices_select = mesh_sampler.sample_body_pos_normal("link6", num_samples=5)
     mesh_sampler.visualize_normal_arrow(mesh_id, geom_id, faces_center_local, rot_mats)
-    
-    # v_start = model.mesh_vertadr[mesh_id]
-    # v_count = model.mesh_vertnum[mesh_id]
-    # vertices = model.mesh_vert[v_start : v_start+v_count].reshape(-1, 3)
-    # f_start = model.mesh_faceadr[mesh_id]
-    # f_count = model.mesh_facenum[mesh_id]
-    # faces = model.mesh_face[f_start : f_start+f_count].reshape(-1, 3)
-    # mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    # boundary_path, boundary_indices, boundary_face_indices = boundary(mesh)
-    # print(len(boundary_path), len(boundary_indices), len(boundary_face_indices))
-    # if len(boundary_face_indices) == 0:
-    #     print("No boundary faces found.")
-    # else:
-    #     boundary_face_indices = np.array(boundary_face_indices[0])
-    #     mesh_sampler.visualize_mesh_indexes(mesh_id=mesh_id, faces_indexes=boundary_face_indices)
-    #     # save the boundary face indices
-    #     mesh_name = mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"]
-    #     # np.save(f"{mesh_name}_boundary_face_indices.npy", boundary_face_indices)
-    
-    # # remove [800, 1311], not visualizable [0, 799], remove [2148, 2220], [2445, 2680], [2841, 3029], [3834, 4022]
-    # # feasible region, [1311, 2148], [2220, 2445], [2680, 2841], [3029, 3834], [4022, -1]
-    # # boundary region, [2220, 2445], [2680, 2841], [3029, 3834]

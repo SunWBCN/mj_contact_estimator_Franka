@@ -68,7 +68,7 @@ def main() -> None:
     mujoco_dyn = mujocoDyn(model, data)
 
     # Set up the mesh sampler, sample a mesh point.
-    sample_body_name = "link7"
+    sample_body_name = "link6"
     mesh_sampler = MeshSampler(model, data, False, robot_name="kuka_iiwa_14")
     mesh_id, geom_id, contact_poss_geom, normal_vecs_geom, rots_mat_contact_geom, face_vertices_select = \
     mesh_sampler.sample_body_pos_normal(sample_body_name, num_samples=1)

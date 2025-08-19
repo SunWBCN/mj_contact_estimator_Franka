@@ -18,6 +18,7 @@ from jax import numpy as jnp
 from utils.mujoco_viewer import MujocoViewer
 from utils.mjx_functions import *
 import matplotlib.pyplot as plt
+
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -197,6 +198,7 @@ def main() -> None:
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.put_data(model, data)
     use_mjx = True
+    update_gt_ext_tau = False
     
     # Prepare the jax model and contact particle filter
     if use_mjx:
@@ -324,21 +326,21 @@ def main() -> None:
                         "target_rot_mats_contact_geom": target_rot_mats_contact_geom,
                         "target_geom_ids": target_geom_ids, "target_body_names": total_target_body_names,
                         "target_global_indexes": global_idxes}
-            # if update_gt_ext_tau:
-            #     geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
-            #     = cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history,
-            #                average_errors=average_errors, iters=10, data_log=data_log, batch_qp_solver=batch_qp_solver,
-            #                polyhedral_num=polyhedral_num, qp_loss=True, qp_solver=None,)            
-            # else:
-            #     # TODO: retrieve the positions in particle sets instead of only one particle set 
-            #     geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world = get_data_cpf_set(cpf_set, mjx_data)
-            # particles_geom_pos_world = geom_poss_world
-            # particles_rot_mat_geom_world = rot_mats_geom_world
-            # carry["carry_particles"]["geom_origin_poss_world"] = particles_geom_pos_world # TODO: need to update in a batch manner
-            # carry["carry_particles"]["geom_origin_mats_world"] = particles_rot_mat_geom_world # TODO: need to update in a batch manner
-            # carry["carry_particles"]["particles_pos_geom"] = get_cpf_pos(cpf_set)
-            # carry["carry_particles"]["particles_mat_geom"] = get_cpf_rot(cpf_set)
-            # carry["carry_particles"]["n_particles_per_group"] = n_particles_per_group
+            if update_gt_ext_tau:
+                geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world \
+                = cpf_step(cpf_set, key, mjx_model, mjx_data, gt_ext_tau=gt_ext_tau, particle_history=particle_history,
+                           average_errors=average_errors, iters=10, data_log=data_log, batch_qp_solver=batch_qp_solver,
+                           polyhedral_num=polyhedral_num, qp_loss=True, qp_solver=None,)            
+            else:
+                # TODO: retrieve the positions in particle sets instead of only one particle set 
+                geom_poss_world, rot_mats_geom_world, com_poss_world, rot_mats_com_world = get_data_cpf_set(cpf_set, mjx_data)
+            particles_geom_pos_world = geom_poss_world
+            particles_rot_mat_geom_world = rot_mats_geom_world
+            carry["carry_particles"]["geom_origin_poss_world"] = particles_geom_pos_world # TODO: need to update in a batch manner
+            carry["carry_particles"]["geom_origin_mats_world"] = particles_rot_mat_geom_world # TODO: need to update in a batch manner
+            carry["carry_particles"]["particles_pos_geom"] = get_cpf_pos(cpf_set)
+            carry["carry_particles"]["particles_mat_geom"] = get_cpf_rot(cpf_set)
+            carry["carry_particles"]["n_particles_per_group"] = n_particles_per_group
                     
         # # Compute the inverse dynamics torques.
         # mujoco.mj_forward(model, data)
@@ -378,14 +380,6 @@ def main() -> None:
     qp_est_ext_wrenches = np.array(qp_est_ext_wrenches)
     computed_gt_ext_taus = np.array(computed_gt_ext_taus)
     gt_ext_wrenches = np.array(gt_ext_wrenches)
-    
-    # # Save the data to a file
-    # data_dict = {"gt_ext_wrenches": gt_ext_wrenches, "gt_ext_taus": gt_ext_taus, 
-    #              "jacs_site": jacs_site, "jacs_site": jacs_site, "jacs_body": jacs_body,
-    #              "jacs_contact": jacs_contact, "gt_ext_wrenches": gt_ext_wrenches,
-    #              "gt_equi_ext_wrenches": gt_equi_ext_wrenches,}
-    # np.savez("data.npz", **data_dict)
-    # exit(0)
     
     fig = plt.figure(figsize=(10, 5))
     plot_param = 711
