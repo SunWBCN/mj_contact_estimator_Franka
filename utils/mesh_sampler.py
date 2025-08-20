@@ -111,6 +111,7 @@ class MeshSampler:
         # self.mesh_id 
         self.robot_name = robot_name
         self._load_feasible_region(robot_name)
+        self._load_boundary_region(robot_name)
         if init_mesh_data:
             self._init_mesh_data()
         else:
@@ -139,14 +140,38 @@ class MeshSampler:
         else:
             raise NotImplementedError(f"Robot {robot_name} not implemented for loading feasible regions.")
 
+    def _load_boundary_region(self, robot_name: str = "kuka_iiwa_14"):
+        """
+        Load boundary region indices for each mesh.
+        """
+        index_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
+        if robot_name == "kuka_iiwa_14":
+            feasible_mesh_names = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
+                    "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
+            self.boundary_region_idxes = {}
+            for mesh_name in feasible_mesh_names:
+                self.boundary_region_idxes[mesh_name] = np.load(f"{index_path}/{mesh_name}_non_manifold_face_indices.npy")
+        else:
+            raise NotImplementedError(f"Robot {robot_name} not implemented for loading boundary regions.")
+
     def _skip_mesh(self, mesh_name: str) -> bool:
         """
         Determine whether to skip a mesh based on its name.
         """
         if self.robot_name == "kuka_iiwa_14":
-            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0"
+            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0" or mesh_name == "link_7"
         else:
             raise NotImplementedError(f"Robot {self.robot_name} not implemented for skipping meshes.")
+
+    def _check_body_name(self, body_name: str):
+        """
+        Check if the body name is valid.
+        """
+        if self.robot_name == "kuka_iiwa_14":
+            valid_body_names = ["link_1", "link_2", "link_3", "link_4", "link_5", "link_6"] # we would not allow to sample from link 7
+            return body_name in valid_body_names
+        else:
+            raise NotImplementedError(f"Robot {self.robot_name} not implemented for checking body names.")
 
     def _init_mesh_data(self):
         """
@@ -266,6 +291,7 @@ class MeshSampler:
                 globalid2geomname.extend(geom_names * len(face_center_list))
                 globalid2localid.extend(list(range(len(face_center_list))))
                 global_num_samples.append(len(face_center_list))
+                
         # Convert lists to numpy arrays
         global_geom_ids = np.array(global_geom_ids)
         global_mesh_ids = np.array(global_mesh_ids)
@@ -410,7 +436,7 @@ class MeshSampler:
         print(vertices.shape, faces.shape, "SHAPE")
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         
-        if faces_indexes is None or faces_indexes == [0, -1]:
+        if faces_indexes is None or (len(faces_indexes) == 2):
             faces_indexes = np.arange(len(faces))
         
         for face_i in faces_indexes:
@@ -697,8 +723,9 @@ class MeshSampler:
             pos: Sampled position (3D vector).
             normal: Sampled normal vector (3D vector).
         """
-        # TODO: deal with the link2, link4, link6 for the multiple meshes case
-        # Need test!
+        # check if the body_name is valid
+        if not self._check_body_name(body_name):
+            raise ValueError(f"Invalid body name: {body_name}")
         n_mesh = len(self.data_dict["body_names_mapping"][body_name]["mesh_name"])
         if n_mesh > 1:
             idx = np.random.randint(0, n_mesh)
