@@ -159,7 +159,7 @@ class MeshSampler:
         Determine whether to skip a mesh based on its name.
         """
         if self.robot_name == "kuka_iiwa_14":
-            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0" or mesh_name == "link_7"
+            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0"
         else:
             raise NotImplementedError(f"Robot {self.robot_name} not implemented for skipping meshes.")
 
