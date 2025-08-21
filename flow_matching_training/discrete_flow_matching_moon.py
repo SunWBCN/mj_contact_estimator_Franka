@@ -19,21 +19,6 @@ class DiscreteFlow(nn.Module):
     def forward(self, x_t: Tensor, t: Tensor) -> Tensor:
         return self.net(torch.cat((t[:, None], self.embed(x_t).flatten(1, 2)), -1)).reshape(list(x_t.shape) + [self.v])
     
-def chi_square_test(dset1, dset2):
-    """
-    Perform chi-squared test on two datasets.
-    """
-    from scipy.stats import chi2_contingency
-    import pandas as pd
-    
-    s1 = pd.Series(dset1, name='X1')
-    s2 = pd.Series(dset2, name='Xt')
-    contingency_table = pd.crosstab(s1, s2)
-    
-    chi2, p, dof, expected = chi2_contingency(contingency_table)
-    print(f"Chi-squared test: chi2={chi2}, p-value={p}")
-    return chi2, p
-    
 if __name__ == "__main__":
     # Visualize the dataset
     batch_size = 1000
@@ -132,7 +117,6 @@ if __name__ == "__main__":
     dset_x1 = Tensor(make_moons(len(results_x_t), noise=0.05)[0])
     dset_x1 = torch.round(torch.clip(dset_x1 * 35 + 50, min=0.0, max=vocab_size - 1)).long()
     dset_x1 = dset_x1.flatten()
-    chi2, p = chi_square_test(dset_x1.numpy(), results_x_t.numpy())
     
     if use_wnb:
         wnb.log({"sampled_moons": wnb.Image(fig)})

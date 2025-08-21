@@ -5,6 +5,8 @@ from sklearn.datasets import make_moons
 import wandb as wnb
 import yaml
 from pathlib import Path
+from tqdm import trange
+import torch.nn.functional as F
 
 class DiscreteFlowLocal(nn.Module):
     def __init__(self, num_offsets: int  = 21, dim: int = 2, h: int = 128, v: int = 128):
@@ -69,24 +71,20 @@ def get_nearest_neighbors(x_t: Tensor, table: Tensor) -> Tensor:
     return row_candidates
 
 if __name__ == "__main__":    
-    # load hyperparameters from yaml file
-    cur_dir = Path(__file__).resolve().parent
-    with open(cur_dir / "configs/config.yaml", "r") as f:
-        config = yaml.safe_load(f)
-    vocab_size = config.get("vocab_size", 128)
-    num_nearest_neibor = config.get("num_nearest_neibor", 41)
+    vocab_size = 128
+    num_nearest_neibor = 41
     num_offsets = num_nearest_neibor
-    batch_size = config.get("batch_size")
-    num_epochs = config.get("num_epochs")
-    lr = config.get("learning_rate")
-    reschedule = config.get("reschedule")
-    enforce = config.get("enforce")
-    temp_anneling = config.get("temp_anneling")
-    temp = config.get("temperature")
-    div = config.get("div", 10.0)
-    sample_step = config.get("sample_step")
+    batch_size = 256 
+    num_epochs = 10000 
+    lr = 0.001 
+    reschedule = True
+    enforce = True
+    temp_anneling = False
+    temp = 10 
+    div = 10 
+    sample_step = 0.1
     gap = (num_nearest_neibor - 1) // 2
-    use_wnb = config.get("use_wnb")
+    use_wnb = False 
     table = generate_closest_indices_table(num_rows=vocab_size, num_closest=num_nearest_neibor)
     
     if reschedule:
@@ -100,12 +98,10 @@ if __name__ == "__main__":
     if use_wnb:
         wnb.init(project="Contact Force Estimation", name=f"{enforce_str}{reschedule_str}LocalDiscreteFlowMatchingMoon")
         wnb.watch(model, log="all")
-        wnb.config.update(config)
 
-    for epoch in range(num_epochs):
+    for epoch in trange(num_epochs):
         x_1 = Tensor(make_moons(batch_size, noise=0.05)[0])
         x_1 = torch.round(torch.clip(x_1 * 35 + 50, min=0.0, max=vocab_size - 1)).long()
-        # x_1 = torch.round(torch.clip(x_1 * 350 + 500, min=0.0, max=vocab_size - 1)).long()
         x_0 = torch.randint(low=0, high=vocab_size, size=(batch_size, 2))
 
         if not reschedule:
@@ -130,9 +126,6 @@ if __name__ == "__main__":
             # compute the distances to the target
             distances = torch.abs(x_1.flatten(0, 1).unsqueeze(1) - x_0_nearest_neighbors)  # shape: (batch_size*2, num_nearest_neibor)
     
-            # t = torch.rand(batch_size, 2)
-            # t_flat = t.flatten(0, 1).unsqueeze(1)
-    
             # retrieve the positions where t is 1
             t_is_one_positions = torch.where(t_flat == 1.0)
             
@@ -141,19 +134,21 @@ if __name__ == "__main__":
                 t_flat = torch.where(t_flat == 1.0, torch.ones_like(t_flat) * 0.99, t_flat)
             
             # compute the Boltzmann distribution
-            # expont = - (distances - torch.max(distances, dim=1, keepdim=True)[0]) # stabilizing techniques     
             expont = - distances
             divider = temp * (1 - t_flat) / t_flat  # Avoid division by zero   
             expont = expont / divider
-            
-            # expont = torch.tanh(t_flat * 4) * (-distances) / (1 - t_flat)
             
             expont_max = torch.max(expont, dim=1, keepdim=True)[0]
             expont = expont - expont_max
             
             boltzmann_dist = torch.exp(expont) / torch.sum(torch.exp(expont), dim=1, keepdim=True)
-            # for i in range(boltzmann_dist.shape[0]):
-            #     print(torch.sum(boltzmann_dist[i]))
+
+            expont_square = - distances ** 2
+            expont_square = expont_square / divider
+            expont_square_max = torch.max(expont_square, dim=1, keepdim=True)[0]
+            expont_square = expont_square - expont_square_max
+            boltzmann_dist_square = torch.exp(expont_square) / torch.sum(torch.exp(expont_square), dim=1, keepdim=True)
+
             sampled_nn_indices = torch.distributions.Categorical(probs=boltzmann_dist).sample()
             x_t = x_0_nearest_neighbors[torch.arange(batch_size * 2), sampled_nn_indices]
             # fill the positions where t is 1 with the target
@@ -164,6 +159,8 @@ if __name__ == "__main__":
 
         logits = model(x_t, t)
         loss = nn.functional.cross_entropy(logits.flatten(0, 1), x_1_nearest_idx.flatten(0, 1)).mean()
+        # log_p = F.log_softmax(logits.flatten(0, 1), dim=1)       # [B, N]        
+        # loss = -(boltzmann_dist * log_p).sum(dim=1).mean()
         optim.zero_grad()
         loss.backward()
         optim.step()
