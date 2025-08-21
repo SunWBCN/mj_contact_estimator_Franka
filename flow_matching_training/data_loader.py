@@ -3,13 +3,6 @@ import torch
 from torch import Tensor
 from pathlib import Path
 
-def normalize_contact_ids(contact_ids: Tensor, max_contact_id: int = 1000) -> Tensor:
-    contact_ids_max = contact_ids.max().item()
-    contact_ids_min = contact_ids.min().item()
-    contact_ids = contact_ids - contact_ids_min  # Normalize to start from 0
-    contact_ids = contact_ids / contact_ids.max() * max_contact_id  # Scale to [0, max_contact_id]
-    return np.round(contact_ids).astype(int)
-
 _link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
 class DataLoader:
     def __init__(self, file_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14"):
@@ -51,16 +44,28 @@ class DataLoader:
         self.joint_tau_cmd_data = self.data["joint_tau_cmd"].reshape(-1, 7)
         self.joint_tau_ext_gt_data = self.data["joint_tau_ext_gt"].reshape(-1, 7)
     
+        # compute the mean and variance of the dataset for normalization in sampling
+        self.joint_pos_mean = self.joint_pos_data.mean(axis=0)
+        self.joint_pos_std = self.joint_pos_data.std(axis=0)
+        self.joint_vel_mean = self.joint_vel_data.mean(axis=0)
+        self.joint_vel_std = self.joint_vel_data.std(axis=0)
+        self.joint_tau_cmd_mean = self.joint_tau_cmd_data.mean(axis=0)
+        self.joint_tau_cmd_std = self.joint_tau_cmd_data.std(axis=0)
+        self.joint_tau_ext_gt_mean = self.joint_tau_ext_gt_data.mean(axis=0)
+        self.joint_tau_ext_gt_std = self.joint_tau_ext_gt_data.std(axis=0)
+
     def _prepare_distance_table(self):
+        # TODO: rewrite loading the distance table.
         # Get the mesh names 
         mesh_names = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_orange", "link_4_grey", "link_5",
                       "link_6_orange", "link_6_grey", "link_7"]
         
         # Load the table for mesh data
         distance_tables = {}
+        dir_name = f"{Path(__file__).resolve().parent}/../kuka_iiwa_14/mesh_geodesic"
         for mesh_name in mesh_names:
-            sliced_file_path = f"{Path(__file__).resolve().parent}/../kuka_iiwa_14/mesh_geodesic/sliced_distance_{mesh_name}.npz"
-            distance_table = np.load(sliced_file_path)["distances"]
+            sliced_file_path = f"{dir_name}/distance_{mesh_name}.npz"
+            distance_table = np.load(sliced_file_path)["distances_faces_sliced"]
             distance_tables[mesh_name] = distance_table
         self.distance_tables = distance_tables
         
@@ -76,8 +81,8 @@ class DataLoader:
     
     def sample_contact_ids_robot_state(self, batch_size: int) -> Tensor:
         contact_ids = self.global_contact_ids
-        contact_ids_max = contact_ids.max().item()
-        contact_ids_min = contact_ids.min().item()
+        # contact_ids_max = contact_ids.max().item()
+        # contact_ids_min = contact_ids.min().item()
         # contact_ids = contact_ids - contact_ids_min  # Normalize to start from 0
         
         random_indices = np.random.randint(0, len(contact_ids), batch_size)
@@ -88,6 +93,13 @@ class DataLoader:
         joint_vel = self.joint_vel_data[random_indices]
         joint_tau_cmd = self.joint_tau_cmd_data[random_indices]
         joint_tau_ext_gt = self.joint_tau_ext_gt_data[random_indices]
+        
+        # normalize the joint states with the mean and variance computed from the dataset
+        joint_pos = (joint_pos - self.joint_pos_mean) / self.joint_pos_std
+        joint_vel = (joint_vel - self.joint_vel_mean) / self.joint_vel_std
+        joint_tau_cmd = (joint_tau_cmd - self.joint_tau_cmd_mean) / self.joint_tau_cmd_std
+        joint_tau_ext_gt = (joint_tau_ext_gt - self.joint_tau_ext_gt_mean) / self.joint_tau_ext_gt_std
+        
         joint_pos = torch.tensor(joint_pos, dtype=torch.float32)
         joint_vel = torch.tensor(joint_vel, dtype=torch.float32)
         joint_tau_cmd = torch.tensor(joint_tau_cmd, dtype=torch.float32)
@@ -107,6 +119,8 @@ class DataLoader:
         """
         Retrieve the nearest k neighbors for each contact ID.
         """
+        contact_ids = self.recover_contact_ids(contact_ids)
+        
         local_contact_ids = self.global_ids_to_local_ids(contact_ids)
         link_names, mesh_ids, mesh_names = self.global_ids_to_link_mesh_names(contact_ids)
         
@@ -115,19 +129,24 @@ class DataLoader:
         
         # Extract the nearest k contact IDs based on the distance table
         nearest_local_contact_ids = []
+        geodesic_distances = []
         for distance_table, local_contact_id in zip(distance_tables, local_contact_ids):
             selected_distance_table = distance_table[local_contact_id]
             nearest_local_contact_id = np.argsort(selected_distance_table)[1:k+1]
             nearest_local_contact_ids.append(nearest_local_contact_id)
+            geodesic_distances.append(selected_distance_table[nearest_local_contact_id])
+            
+        geodesic_distances = np.array(geodesic_distances)
         nearest_local_contact_ids = np.array(nearest_local_contact_ids)
         nearest_local_contact_ids = nearest_local_contact_ids.flatten()
         # Extend the link_names to match the number of nearest_local_contact_ids
         link_names = np.repeat(link_names, k)
         nearest_contact_positions = self.get_data_link_names(link_names, nearest_local_contact_ids)[0]
-        # Reshape to match the number of contact IDs and k neighbors
-        nearest_contact_positions = nearest_contact_positions.reshape(-1, k * 3)
-        return nearest_contact_positions
         
+        # Reshape to match the number of contact IDs and k neighbors
+        nearest_contact_positions = nearest_contact_positions.reshape(-1, k * 3)        
+        return nearest_contact_positions, geodesic_distances
+
     def recover_contact_ids(self, contact_ids: Tensor) -> Tensor:
         contact_ids_max = self.global_contact_ids.max().item()
         contact_ids_min = self.global_contact_ids.min().item()
@@ -138,6 +157,14 @@ class DataLoader:
     # Helper functions
     def global2link_name(self, global_ids: np.ndarray):
         mapping = self.data_dict["globalid2linkname"]
+        return mapping[global_ids]
+    
+    def global2mesh_id(self, global_ids: np.ndarray):
+        mapping = self.data_dict["global_mesh_ids"]
+        return mapping[global_ids]
+    
+    def global2mesh_name(self, global_ids: np.ndarray):
+        mapping = self.data_dict["global_mesh_names"]
         return mapping[global_ids]
     
     def retrieve_contact_pos_from_ids(self, contact_ids: np.ndarray) -> np.ndarray:
@@ -172,8 +199,8 @@ class DataLoader:
         Convert global contact IDs to local mesh names.
         """
         link_names = self.global2link_name(global_idxs)
-        mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
-        mesh_names = np.array([self.data_dict["body_names_mapping"][name]["mesh_name"] for name in link_names])
+        mesh_ids = self.global2mesh_id(global_idxs)
+        mesh_names = self.global2mesh_name(global_idxs)
         return link_names, mesh_ids, mesh_names
     
     def get_data(self, global_idxs: np.ndarray) -> tuple:
@@ -191,6 +218,7 @@ class DataLoader:
         return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids, mesh_names
     
     def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
+        # TODO: fix it
         link_name_ids = []
         for link_name in link_names:
             link_name_ids.append(_link_names_.index(link_name))
@@ -212,16 +240,5 @@ if __name__ == "__main__":
     print(c_ids.shape, aug_state.shape, contact_positions.shape)
     
     # retrieve nearest neighbors
-    nearest_contact_positions = d_loader.retreive_nn_neibors(c_ids, k=20)
+    nearest_contact_positions, geodesic_distances = d_loader.retreive_nn_neibors(c_ids.numpy(), k=20)
     print(f"Nearest contact positions shape: {nearest_contact_positions.shape}")
-    
-    
-    # print(d_loader.)
-    # # visualize the distribution of contact ids
-    # import matplotlib.pyplot as plt
-    # plt.hist(d_loader.global_contact_ids, bins=50)
-    # plt.title("Distribution of Contact IDs")
-    # plt.xlabel("Contact ID")
-    # plt.ylabel("Frequency")
-    # plt.show()
-    
