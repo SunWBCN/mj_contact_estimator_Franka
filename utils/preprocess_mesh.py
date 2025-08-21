@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
     # generating geodesic distance table
     distances_faces = np.ones(shape=(len(faces), len(faces)), dtype=np.float64) * -1  # shape (n_faces, n_faces)
-    face_dis_repre = "min"
+    face_dis_repre = "mean"
     for i in trange(len(valid_face_indices), desc=f"Computing geodesic distances for faces for {mesh_name}"):
         sourceFaceIndex = valid_face_indices[i]
         for targetFaceIndex in valid_face_indices:
