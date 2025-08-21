@@ -168,7 +168,7 @@ class MeshSampler:
         Check if the body name is valid.
         """
         if self.robot_name == "kuka_iiwa_14":
-            valid_body_names = ["link_1", "link_2", "link_3", "link_4", "link_5", "link_6"] # we would not allow to sample from link 7
+            valid_body_names = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"] # we would not allow to sample from link 7
             return body_name in valid_body_names
         else:
             raise NotImplementedError(f"Robot {self.robot_name} not implemented for checking body names.")
