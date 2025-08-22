@@ -121,6 +121,14 @@ class MeshSampler:
             for mesh_name in self.mesh_names:
                 if mesh_name not in self.data_dict:
                     print(f"Mesh {mesh_name} not found in loaded data.")
+                    
+        print(f"============INFO of the dataset============")
+        num_contact_positions = self.data_dict["global_face_center_list"].shape[0]
+        print(f"Total global contacts: {num_contact_positions}")
+        for mesh_name in self.mesh_names:
+            if not self._skip_mesh(mesh_name):
+                num_faces = self.data_dict[mesh_name]['face_center_list'].shape[0]
+                print(f"Mesh {mesh_name} has {num_faces} feasible faces")
 
     def _load_feasible_region(self, robot_name: str = "kuka_iiwa_14"):
         """
@@ -235,7 +243,8 @@ class MeshSampler:
                 print("================", mesh_name, "================")
                 print(f"Number of faces: {len(faces_)}")
                 print(f"Number of faces before: {len(faces)}")
-                        
+            
+            faces = faces_ # don't forget to assign it .......
             data_dict_mesh_i = {}
             for face_i in range(len(faces)):
                 face = faces[face_i]
@@ -291,7 +300,7 @@ class MeshSampler:
                 globalid2geomname.extend(geom_names * len(face_center_list))
                 globalid2localid.extend(list(range(len(face_center_list))))
                 global_num_samples.append(len(face_center_list))
-                
+                                
         # Convert lists to numpy arrays
         global_geom_ids = np.array(global_geom_ids)
         global_mesh_ids = np.array(global_mesh_ids)
