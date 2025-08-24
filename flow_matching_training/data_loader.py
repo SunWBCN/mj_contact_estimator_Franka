@@ -4,10 +4,14 @@ from torch import Tensor
 from pathlib import Path
 
 _link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
+_mesh_names_ = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_orange", "link_4_grey", "link_5",
+                "link_6_orange", "link_6_grey", "link_7"]
 class DataLoader:
-    def __init__(self, file_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14"):
+    def __init__(self, file_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14", nn_num: int = 20):
         data_path = (Path(__file__).resolve().parent / ".." / "dataset_mujoco").as_posix()
         self.data = np.load(f"{data_path}/{file_name}.npz")
+        self.robot_name = robot_name
+        self.nn_num = nn_num
         self._prepare_contact_states()
         self._prepare_joint_data(limited_dim)
         self._prepare_mesh_data(robot_name)
@@ -36,7 +40,8 @@ class DataLoader:
 
         self.max_contact_id = contact_global_ids.max().item()
         self.min_contact_id = contact_global_ids.min().item()
-    
+        print("=================== Prepared contact states finished")
+
     def _prepare_joint_data(self, limited_dim: int = -1):
         # flatten joint data except for the first dimension
         self.joint_pos_data = self.data["joint_pos"].reshape(-1, 7)
@@ -53,22 +58,26 @@ class DataLoader:
         self.joint_tau_cmd_std = self.joint_tau_cmd_data.std(axis=0)
         self.joint_tau_ext_gt_mean = self.joint_tau_ext_gt_data.mean(axis=0)
         self.joint_tau_ext_gt_std = self.joint_tau_ext_gt_data.std(axis=0)
+        print("=================== Prepared joint data finished")
 
     def _prepare_distance_table(self):
-        # TODO: rewrite loading the distance table.
-        # Get the mesh names 
-        mesh_names = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_orange", "link_4_grey", "link_5",
-                      "link_6_orange", "link_6_grey", "link_7"]
-        
-        # Load the table for mesh data
-        distance_tables = {}
-        dir_name = f"{Path(__file__).resolve().parent}/../kuka_iiwa_14/mesh_geodesic"
-        for mesh_name in mesh_names:
-            sliced_file_path = f"{dir_name}/distance_{mesh_name}.npz"
-            distance_table = np.load(sliced_file_path)["distances_faces_sliced"]
-            distance_tables[mesh_name] = distance_table
-        self.distance_tables = distance_tables
-        
+        if self.robot_name == "kuka_iiwa_14":
+            # Get the mesh names
+            mesh_names = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_orange", "link_4_grey", "link_5",
+                          "link_6_orange", "link_6_grey", "link_7"]
+
+            # Load the table for mesh data
+            distance_tables = {}
+            dir_name = f"{Path(__file__).resolve().parent}/../kuka_iiwa_14/mesh_geodesic"
+            for mesh_name in mesh_names:
+                sliced_file_path = f"{dir_name}/distance_{mesh_name}.npz"
+                distance_table = np.load(sliced_file_path)["distances_faces_sliced"]
+                distance_tables[mesh_name] = distance_table
+            self.distance_tables = distance_tables
+        else:
+            raise ValueError(f"Distance table for robot {self.robot_name} is not implemented.")
+        print("=================== Prepared distance table finished")
+
     def get_distance_table(self, mesh_names: str):
         result = list(map(self.distance_tables.get, mesh_names))
         return result
@@ -130,22 +139,21 @@ class DataLoader:
         # Extract the nearest k contact IDs based on the distance table
         nearest_local_contact_ids = []
         geodesic_distances = []
-        for distance_table, local_contact_id in zip(distance_tables, local_contact_ids):
+        neighbor_mesh_names = []
+        for distance_table, local_contact_id, mesh_name in zip(distance_tables, local_contact_ids, mesh_names):
             selected_distance_table = distance_table[local_contact_id]
             nearest_local_contact_id = np.argsort(selected_distance_table)[1:k+1]
             nearest_local_contact_ids.append(nearest_local_contact_id)
             geodesic_distances.append(selected_distance_table[nearest_local_contact_id])
+            neighbor_mesh_names.append(np.repeat(mesh_name, k))
             
         geodesic_distances = np.array(geodesic_distances)
         nearest_local_contact_ids = np.array(nearest_local_contact_ids)
         nearest_local_contact_ids = nearest_local_contact_ids.flatten()
-        # Extend the link_names to match the number of nearest_local_contact_ids
-        link_names = np.repeat(link_names, k)
-        nearest_contact_positions = self.get_data_link_names(link_names, nearest_local_contact_ids)[0]
+        neighbor_mesh_names = np.array(neighbor_mesh_names).flatten()
         
-        # Reshape to match the number of contact IDs and k neighbors
-        nearest_contact_positions = nearest_contact_positions.reshape(-1, k * 3)        
-        return nearest_contact_positions, geodesic_distances
+        nearest_contact_ids = self.local2global_id(neighbor_mesh_names, nearest_local_contact_ids)
+        return nearest_contact_ids, geodesic_distances
 
     def recover_contact_ids(self, contact_ids: Tensor) -> Tensor:
         contact_ids_max = self.global_contact_ids.max().item()
@@ -153,7 +161,56 @@ class DataLoader:
         # contact_ids = contact_ids + contact_ids_min  # Recover to original range
         # convert to integers
         return contact_ids
-    
+
+    def sorted_neibors_source_target(self, source_contact_id: np.ndarray, target_contact_id: np.ndarray) -> tuple:
+        nearest_contact_ids, source_geodesic_distances = \
+        self.retreive_nn_neibors(source_contact_id, self.nn_num)
+        target_local_id = self.global_ids_to_local_ids(np.array([target_contact_id]))[0]
+        mesh_name = self.global_ids_to_link_mesh_names([source_contact_id])[0]
+        distance_table = self.get_distance_table(mesh_name)
+        nearest_local_id = self.global_ids_to_local_ids(nearest_contact_ids)
+        
+        geodesic_distances = distance_table[target_local_id, nearest_local_id]
+        sorted_indexes = np.argsort(geodesic_distances)
+        sorted_geodesic_distances = geodesic_distances[sorted_indexes]
+        sorted_nearest_contact_ids = nearest_contact_ids[sorted_indexes]
+        return sorted_indexes, sorted_geodesic_distances, sorted_nearest_contact_ids
+
+    def search_closest_neibor_within_link(self, source_contact_id: int, target_contact_id: int) -> tuple:
+        """
+        Search the closest neighbor within the same link.
+            Outpout: 
+                closest_neibor_id: global id for the closest neibor from source to target
+                geodesic_distance: the geodesic distance 
+        """
+        if source_contact_id == target_contact_id:
+            geodesic_distance = 0.0
+            closest_neibor_id = source_contact_id
+            index = 0
+        else:
+            sorted_indexes, sorted_geodesic_distances, sorted_nearest_contact_ids = self.sorted_neibors_source_target(source_contact_id, target_contact_id)
+            index = sorted_indexes[0]
+            geodesic_distance = sorted_geodesic_distances[0]
+            closest_neibor_id = sorted_nearest_contact_ids[0]
+        return closest_neibor_id, geodesic_distance, index
+
+    def search_closest_neibors(self, source_contact_ids: np.ndarray, target_contact_ids: np.ndarray) -> tuple:
+        source_link_names = self.global2link_name(source_contact_ids)
+        target_link_names = self.global2link_name(target_contact_ids)
+        
+        closest_neibor_ids, geodesic_distances, indexes = [], [], []
+        for i in range(len(source_contact_ids)):
+            source_link_name = source_link_names[i]
+            target_link_name = target_link_names[i]
+            if source_link_name == target_link_name:
+                closest_neibor_id, geodesic_distance, index = self.search_closest_neibor_within_link(source_contact_ids[i], target_contact_ids[i])
+                closest_neibor_ids.append(closest_neibor_id)
+                geodesic_distances.append(geodesic_distance)
+                indexes.append(index)
+            else:
+                pass
+        return np.array(closest_neibor_ids), np.array(geodesic_distances), np.array(indexes)
+
     # Helper functions
     def global2link_name(self, global_ids: np.ndarray):
         mapping = self.data_dict["globalid2linkname"]
@@ -175,9 +232,11 @@ class DataLoader:
         contact_positions = self.retrieve_contact_pos_from_ids(contact_ids)
         return torch.tensor(contact_positions, dtype=torch.float32)
 
-    def retreive_nn_neibors_from_ids_tensor(self, contact_ids: Tensor, k: int = 20) -> Tensor:
+    def retreive_nn_contact_pos_from_ids_tensor(self, contact_ids: Tensor, k: int) -> Tensor:
         contact_ids = contact_ids.cpu().numpy()
-        nearest_contact_positions = self.retreive_nn_neibors(contact_ids, k)
+        nearest_global_ids, geodesic_distances = \
+        self.retreive_nn_neibors(contact_ids, k)
+        nearest_contact_positions = self.retrieve_contact_pos_from_ids(nearest_global_ids)
         return torch.tensor(nearest_contact_positions, dtype=torch.float32)
 
     def retreive_link_ids_from_ids_tensor(self, contact_ids: Tensor) -> Tensor:
@@ -212,23 +271,20 @@ class DataLoader:
         rot_mat_list = self.data_dict["global_rot_mat_list"][global_idxs]
         face_vertices_list = self.data_dict["global_face_vertices_list"][global_idxs]
         geom_ids = self.data_dict["global_geom_ids"][global_idxs]
-        link_names = self.global2link_name(global_idxs)
-        mesh_ids = np.array([self.data_dict["body_names_mapping"][name]["mesh_id"] for name in link_names])
-        mesh_names = np.array([self.data_dict["body_names_mapping"][name]["mesh_name"] for name in link_names])
-        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, link_names, mesh_ids, mesh_names
+        link_names, mesh_ids, mesh_names = \
+        self.global_ids_to_link_mesh_names(global_idxs)
+        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, \
+               link_names, mesh_ids, mesh_names
     
-    def get_data_link_names(self, link_names: list, local_idxes: np.ndarray):
-        # TODO: fix it
-        link_name_ids = []
-        for link_name in link_names:
-            link_name_ids.append(_link_names_.index(link_name))
-        
+    def local2global_id(self, mesh_names: list, local_idxes: np.ndarray):
+        mesh_name_ids = []
+        for mesh_name in mesh_names:
+            mesh_name_ids.append(_mesh_names_.index(mesh_name))
+        mesh_name_ids = np.array(mesh_name_ids)
         start_end_indices = np.array(self.data_dict["global_start_end_indices"])
-        starting_indices = start_end_indices[link_name_ids, 0]
+        starting_indices = start_end_indices[mesh_name_ids, 0]
         global_idxs = starting_indices + local_idxes
-        face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids, \
-        link_names, mesh_ids, mesh_names = self.get_data(global_idxs)
-        return face_center_list, normal_list, rot_mat_list, face_vertices_list, geom_ids
+        return global_idxs
 
 if __name__ == "__main__":
     file_name = "dataset_batch_1_1000eps"
@@ -242,3 +298,4 @@ if __name__ == "__main__":
     # retrieve nearest neighbors
     nearest_contact_positions, geodesic_distances = d_loader.retreive_nn_neibors(c_ids.numpy(), k=20)
     print(f"Nearest contact positions shape: {nearest_contact_positions.shape}")
+    print(geodesic_distances)
