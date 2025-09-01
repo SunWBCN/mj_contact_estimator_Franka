@@ -2,19 +2,27 @@ import numpy as np
 import torch
 from torch import Tensor
 from pathlib import Path
+import os
 
 _link_names_ = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
 _mesh_names_ = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_orange", "link_4_grey", "link_5",
                 "link_6_orange", "link_6_grey", "link_7"]
 class DataLoader:
-    def __init__(self, file_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14", nn_num: int = 20):
-        data_path = (Path(__file__).resolve().parent / ".." / "dataset_mujoco").as_posix()
+    def __init__(self, file_name, dir_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14", nn_num: int = 20,
+                 max_num_contacts: int = 10):
+        data_path = (Path(__file__).resolve().parent / "dataset" / f"{dir_name}").as_posix()
+        self.preprocessed_contact_data_path = f"{data_path}/preprocessed_{file_name}.npz"
         self.data = np.load(f"{data_path}/{file_name}.npz")
         self.robot_name = robot_name
+        if self.robot_name == "kuka_iiwa_14":
+            self.num_joints = 7
+        else:
+            raise ValueError(f"Number of joints for robot {self.robot_name} is not implemented.")
         self.nn_num = nn_num
+        self.max_num_contacts = max_num_contacts
+        self._prepare_mesh_data(robot_name)
         self._prepare_contact_states()
         self._prepare_joint_data(limited_dim)
-        self._prepare_mesh_data(robot_name)
         self._prepare_distance_table()
         
     def _prepare_mesh_data(self, robot_name: str = "kuka_iiwa_14"):
@@ -23,24 +31,128 @@ class DataLoader:
         print("Mesh data loaded from mesh_data.npy")
     
     def _prepare_contact_states(self):
-        contacts = self.data["contacts"]
-        # currently only prepare for the first contact
-        contact_global_ids = contacts[:, :, 0, 13].reshape(-1, )
-        self.global_contact_ids = contact_global_ids
-        contact_positions = contacts[:, :, 0, :3]
-        contact_forces = contacts[:, :, 0, 3:6]
-        surface_normals = contacts[:, :, 0, 6:9]
-        contact_positions = contact_positions.reshape(-1, 3)
-        contact_forces = contact_forces.reshape(-1, 3)
-        surface_normals = surface_normals.reshape(-1, 3)
+        if self.preprocessed_contact_data_path is None or not os.path.exists(self.preprocessed_contact_data_path):
+            print("=================== No preprocessed data found. Preparing contact states")
+            # TODO: implement contact state preparation for the case when number of contacts is variable
+            contacts = self.data["contacts"]
+            feasible_contact_positions = []
+            feasible_contact_forces = []
+            feasible_surface_normals = []
+            feasible_contact_num = []
+            feasible_contact_ids = []
+                    
+            self.total_steps = contacts.shape[0] * contacts.shape[1]
+            self.eps = contacts.shape[0]
+            self.ep_len = contacts.shape[1]
 
-        self.contact_forces = contact_forces
-        self.surface_normals = surface_normals
-        self.contact_positions = contact_positions
+            # compute the feasible contact states
+            for ep in contacts:
+                for step in ep:
+                    c_num = np.zeros(self.num_joints, dtype=int)
+                    tmp_contact_pos = []
+                    tmp_contact_force = []
+                    tmp_surface_normal = []
+                    tmp_contact_ids = []
+                    for c in step:
+                        if np.isnan(c[0]):
+                            continue
+                        else:
+                            tmp_contact_pos.extend(c[:3].copy())
+                            tmp_contact_force.extend(c[3:6].copy())
+                            tmp_surface_normal.extend(c[6:9].copy())
+                            contact_id = int(c[13])
+                            tmp_contact_ids.extend([contact_id])
+                            link_names, _, _, = self.global_ids_to_link_mesh_names(np.array([contact_id]))
+                            link_id = _link_names_.index(link_names[0])
+                            c_num[link_id] += 1
+                    if len(tmp_contact_pos) != 0:
+                        tmp_contact_pos = np.array(tmp_contact_pos)
+                        tmp_contact_force = np.array(tmp_contact_force)
+                        tmp_surface_normal = np.array(tmp_surface_normal)
+                        tmp_contact_ids = np.array(tmp_contact_ids)
+                        feasible_contact_positions.append(tmp_contact_pos.copy())
+                        feasible_contact_forces.append(tmp_contact_force.copy())
+                        feasible_surface_normals.append(tmp_surface_normal.copy())
+                        feasible_contact_ids.append(tmp_contact_ids.copy())
+                    feasible_contact_num.append(c_num)
 
-        self.max_contact_id = contact_global_ids.max().item()
-        self.min_contact_id = contact_global_ids.min().item()
-        print("=================== Prepared contact states finished")
+            # replace all Nan with -1000
+            contacts = np.nan_to_num(contacts, nan=-1000.0)
+            # extract contact ids, positions, forces and normals
+            contact_global_ids = contacts[:, :, :, 13].astype(int)
+            contact_global_positions = contacts[:, :, :, :3]
+            contact_global_forces = contacts[:, :, :, 3:6]
+            contact_global_normals = contacts[:, :, :, 6:9]
+            
+            # Add Padding
+            # if contact_global_ids's maximum dimension is smaller than self.max_num_contacts
+            # extend it with all -1000, to match the max_num_contacts, the same as contact
+            # positions, contact forces and contact normals
+            if contact_global_ids.shape[-1] < self.max_num_contacts:
+                padding = np.full((contact_global_ids.shape[0], contact_global_ids.shape[1], self.max_num_contacts - contact_global_ids.shape[-1]), -1000, dtype=int)
+                contact_global_ids = np.concatenate((contact_global_ids, padding), axis=2)
+                padding = np.full((contact_global_positions.shape[0], contact_global_positions.shape[1], self.max_num_contacts - contact_global_positions.shape[2], 3), -1000.0)
+                contact_global_positions = np.concatenate((contact_global_positions, padding), axis=2)
+                padding = np.full((contact_global_forces.shape[0], contact_global_forces.shape[1], self.max_num_contacts - contact_global_forces.shape[2], 3), -1000.0)
+                contact_global_forces = np.concatenate((contact_global_forces, padding), axis=2)
+                padding = np.full((contact_global_normals.shape[0], contact_global_normals.shape[1], self.max_num_contacts - contact_global_normals.shape[2], 3), -1000.0)
+                contact_global_normals = np.concatenate((contact_global_normals, padding), axis=2)
+            # import pdb; pdb.set_trace()
+            self.global_contact_ids = contact_global_ids.reshape(-1, self.max_num_contacts)
+            self.contact_positions = contact_global_positions.reshape(-1, 3 * self.max_num_contacts)
+            self.contact_forces = contact_global_forces.reshape(-1, 3 * self.max_num_contacts)
+            self.surface_normals = contact_global_normals.reshape(-1, 3 * self.max_num_contacts)
+
+            # define the overall padding for contact ids, contact positions, forces and normals
+            self.global_contact_ids_paddings = self.global_contact_ids == -1000
+            self.contact_positions_paddings = self.contact_positions == -1000
+            self.contact_forces_paddings = self.contact_forces == -1000
+            self.surface_normals_paddings = self.surface_normals == -1000
+
+            feasible_contact_positions = np.array(feasible_contact_positions, dtype=object)
+            feasible_contact_forces = np.array(feasible_contact_forces, dtype=object)
+            feasible_surface_normals = np.array(feasible_surface_normals, dtype=object)
+            feasible_contact_num = np.array(feasible_contact_num, dtype=np.int32)
+            feasible_contact_ids = np.array(feasible_contact_ids, dtype=object)
+
+            self.feasible_global_contact_ids = feasible_contact_ids
+            self.feasible_global_contact_positions = feasible_contact_positions
+            self.feasible_global_contact_forces = feasible_contact_forces
+            self.feasible_global_surface_normals = feasible_surface_normals
+            self.feasible_global_contact_num = feasible_contact_num
+            print("=================== Prepared contact states finished")
+            print("=================== Saving the preprocessed data")
+            np.savez_compressed(self.preprocessed_contact_data_path,
+                                 global_contact_ids=self.global_contact_ids,
+                                 contact_positions=self.contact_positions,
+                                 contact_forces=self.contact_forces,
+                                 surface_normals=self.surface_normals,
+                                 feasible_contact_ids=self.feasible_global_contact_ids,
+                                 feasible_contact_positions=self.feasible_global_contact_positions,
+                                 feasible_contact_forces=self.feasible_global_contact_forces,
+                                 feasible_surface_normals=self.feasible_global_surface_normals,
+                                 feasible_contact_num=self.feasible_global_contact_num,
+                                 total_steps=self.total_steps,
+                                 eps=self.eps,
+                                 ep_len=self.ep_len
+                                 )
+            print("=================== Saved the preprocessed data")
+        else:
+            print("=================== Loading the preprocessed data")
+            data = np.load(self.preprocessed_contact_data_path, allow_pickle=True)
+            self.global_contact_ids = data["global_contact_ids"]
+            self.contact_positions = data["contact_positions"]
+            self.contact_forces = data["contact_forces"]
+            self.surface_normals = data["surface_normals"]
+            self.feasible_global_contact_ids = data["feasible_contact_ids"]
+            self.feasible_global_contact_positions = data["feasible_contact_positions"]
+            self.feasible_global_contact_forces = data["feasible_contact_forces"]
+            self.feasible_global_surface_normals = data["feasible_surface_normals"]
+            self.feasible_global_contact_num = data["feasible_contact_num"]
+            self.total_steps = int(data["total_steps"])
+            self.eps = int(data["eps"])
+            self.ep_len = int(data["ep_len"])
+            print("=================== Loaded the preprocessed data")
 
     def _prepare_joint_data(self, limited_dim: int = -1):
         # flatten joint data except for the first dimension
@@ -88,13 +200,10 @@ class DataLoader:
     def get_contacts(self):
         return self.data["contacts"]
     
-    def sample_contact_ids_robot_state(self, batch_size: int) -> Tensor:
+    def get_data_from_dset(self, random_indices) -> Tensor:
         contact_ids = self.global_contact_ids
-        # contact_ids_max = contact_ids.max().item()
-        # contact_ids_min = contact_ids.min().item()
-        # contact_ids = contact_ids - contact_ids_min  # Normalize to start from 0
-        
-        random_indices = np.random.randint(0, len(contact_ids), batch_size)
+        # assert len(contact_ids) == self.total_steps, f"Expected {self.total_steps} contact ids, but got {len(contact_ids)}"
+
         contact_ids = contact_ids[random_indices]
         contact_ids = torch.tensor(contact_ids, dtype=torch.long)
         
@@ -119,21 +228,77 @@ class DataLoader:
         contact_positions = self.contact_positions[random_indices]
         contact_forces = self.contact_forces[random_indices]
         surface_normals = self.surface_normals[random_indices]
+        contact_nums = self.feasible_global_contact_num[random_indices]
         contact_positions = torch.tensor(contact_positions, dtype=torch.float32)
         contact_forces = torch.tensor(contact_forces, dtype=torch.float32)
         surface_normals = torch.tensor(surface_normals, dtype=torch.float32)
-        return contact_ids, aug_state, contact_positions
+        contact_nums = torch.tensor(contact_nums, dtype=torch.int32)
+
+        return contact_ids, aug_state, contact_positions, contact_nums
         
+    def global2local_step(self, global_steps):
+        local_steps = global_steps % self.ep_len
+        local_eps = global_steps // self.ep_len
+        return local_steps, local_eps
+        
+    def local2global_step(self, local_eps, local_steps):
+        global_steps = local_steps + local_eps * self.ep_len
+        return global_steps
+
+    # Function only for training high level
+    def sample_contact_ids_robot_state(self, batch_size: int) -> Tensor:
+        random_indices = np.random.randint(0, self.total_steps, batch_size)
+        return self.get_data_from_dset(random_indices)
+
+    # Function only for training high level
+    def sample_contact_ids_robot_state_history(self, batch_size: int, history_len: int = 5) -> Tensor:
+        global_random_indices = np.random.randint(0, self.total_steps, batch_size)
+        
+        # retrieve the current one
+        contact_ids, aug_state, contact_positions, contact_nums = self.get_data_from_dset(global_random_indices)
+
+        # retrieve the data from history
+        local_indices, local_eps = self.global2local_step(global_random_indices)
+
+        # compute history indices
+        history_indices = [local_indices - i for i in range(1, history_len+1)]
+        # record the indices in the history data where indices are equal or smaller than 0
+        history_indices_smaller_then_zero = [torch.tensor(indices) < 0 for indices in history_indices]
+        history_indices = [torch.clamp(torch.tensor(indices), min=0) for indices in history_indices]
+        history_indices = torch.stack(history_indices, dim=1).reshape(-1)
+        
+        # expand the dimension of local_eps the same as history indices
+        local_eps = [torch.tensor(local_eps) for _ in range(history_len)]
+        local_eps = torch.stack(local_eps, dim=1).reshape(-1)
+        global_history_indices = self.local2global_step(local_eps, history_indices)
+        contact_ids_history, aug_state_history, contact_positions_history, contact_nums_history = self.get_data_from_dset(global_history_indices)
+        
+        # special treatment for history of contact numbers, if the index is equal or smaller than 0 before
+        # set the corresponding contact number to all zero
+        history_indices_smaller_then_zero = torch.stack(history_indices_smaller_then_zero, dim=1).reshape(-1)
+        contact_nums_history[history_indices_smaller_then_zero] = 0
+        contact_ids_history = contact_ids_history.reshape(batch_size, -1)
+        aug_state_history = aug_state_history.reshape(batch_size, -1)
+        contact_positions_history = contact_positions_history.reshape(batch_size, -1)
+        contact_nums_history = contact_nums_history.reshape(batch_size, -1)
+        return contact_ids, aug_state, contact_positions, contact_nums, \
+               contact_ids_history, aug_state_history, contact_positions_history, \
+               contact_nums_history
+              
+    # Function only for low level training 
+    # def sample_
+
     def retreive_nn_neibors(self, contact_ids: np.ndarray, k: int = 20) -> np.ndarray:
         """
         Retrieve the nearest k neighbors for each contact ID.
         """
         contact_ids = self.recover_contact_ids(contact_ids)
-        
+
         local_contact_ids = self.global_ids_to_local_ids(contact_ids)
         link_names, mesh_ids, mesh_names = self.global_ids_to_link_mesh_names(contact_ids)
         
         # Retrieve the distance table for the corresponding mesh
+        import pdb; pdb.set_trace()
         distance_tables = self.get_distance_table(mesh_names)
         
         # Extract the nearest k contact IDs based on the distance table
@@ -288,14 +453,14 @@ class DataLoader:
 
 if __name__ == "__main__":
     file_name = "dataset_batch_1_1000eps"
-    d_loader = DataLoader(file_name)
-    print(d_loader.max_contact_id, d_loader.min_contact_id)
+    dir_name = "data-link7-1-2-contact_v3"
+    d_loader = DataLoader(file_name, dir_name)
     batch_size = 1000
-    c_ids, aug_state, contact_positions = d_loader.sample_contact_ids_robot_state(batch_size=batch_size)
+    c_ids, aug_state, contact_positions, contact_nums = d_loader.sample_contact_ids_robot_state(batch_size=batch_size)
     print(f"Sampled contact ID min: {c_ids.min().item()}, max: {c_ids.max().item()}")
     print(c_ids.shape, aug_state.shape, contact_positions.shape)
     
-    # retrieve nearest neighbors
-    nearest_contact_positions, geodesic_distances = d_loader.retreive_nn_neibors(c_ids.numpy(), k=20)
-    print(f"Nearest contact positions shape: {nearest_contact_positions.shape}")
-    print(geodesic_distances)
+    # # TODO: debug for retrieve nearest neighbors
+    # nearest_contact_positions, geodesic_distances = d_loader.retreive_nn_neibors(c_ids.numpy(), k=20)
+    # print(f"Nearest contact positions shape: {nearest_contact_positions.shape}")
+    # print(geodesic_distances)
