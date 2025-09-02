@@ -16,6 +16,7 @@ class DataLoader:
         self.robot_name = robot_name
         if self.robot_name == "kuka_iiwa_14":
             self.num_joints = 7
+            self.max_contact_id = 53642 # 53643 feasible contact positions
         else:
             raise ValueError(f"Number of joints for robot {self.robot_name} is not implemented.")
         self.nn_num = nn_num
@@ -76,8 +77,9 @@ class DataLoader:
                         feasible_contact_ids.append(tmp_contact_ids.copy())
                     feasible_contact_num.append(c_num)
 
-            # replace all Nan with -1000
-            contacts = np.nan_to_num(contacts, nan=-1000.0)
+            # replace all Nan with a padding ID
+            padding_id = self.max_contact_id + 1
+            contacts = np.nan_to_num(contacts, nan=padding_id)
             # extract contact ids, positions, forces and normals
             contact_global_ids = contacts[:, :, :, 13].astype(int)
             contact_global_positions = contacts[:, :, :, :3]
@@ -86,16 +88,16 @@ class DataLoader:
             
             # Add Padding
             # if contact_global_ids's maximum dimension is smaller than self.max_num_contacts
-            # extend it with all -1000, to match the max_num_contacts, the same as contact
+            # extend it with all padding_id, to match the max_num_contacts, the same as contact
             # positions, contact forces and contact normals
             if contact_global_ids.shape[-1] < self.max_num_contacts:
-                padding = np.full((contact_global_ids.shape[0], contact_global_ids.shape[1], self.max_num_contacts - contact_global_ids.shape[-1]), -1000, dtype=int)
+                padding = np.full((contact_global_ids.shape[0], contact_global_ids.shape[1], self.max_num_contacts - contact_global_ids.shape[-1]), padding_id, dtype=int)
                 contact_global_ids = np.concatenate((contact_global_ids, padding), axis=2)
-                padding = np.full((contact_global_positions.shape[0], contact_global_positions.shape[1], self.max_num_contacts - contact_global_positions.shape[2], 3), -1000.0)
+                padding = np.full((contact_global_positions.shape[0], contact_global_positions.shape[1], self.max_num_contacts - contact_global_positions.shape[2], 3), padding_id, dtype=float)
                 contact_global_positions = np.concatenate((contact_global_positions, padding), axis=2)
-                padding = np.full((contact_global_forces.shape[0], contact_global_forces.shape[1], self.max_num_contacts - contact_global_forces.shape[2], 3), -1000.0)
+                padding = np.full((contact_global_forces.shape[0], contact_global_forces.shape[1], self.max_num_contacts - contact_global_forces.shape[2], 3), padding_id, dtype=float)
                 contact_global_forces = np.concatenate((contact_global_forces, padding), axis=2)
-                padding = np.full((contact_global_normals.shape[0], contact_global_normals.shape[1], self.max_num_contacts - contact_global_normals.shape[2], 3), -1000.0)
+                padding = np.full((contact_global_normals.shape[0], contact_global_normals.shape[1], self.max_num_contacts - contact_global_normals.shape[2], 3), padding_id, dtype=float)
                 contact_global_normals = np.concatenate((contact_global_normals, padding), axis=2)
             # import pdb; pdb.set_trace()
             self.global_contact_ids = contact_global_ids.reshape(-1, self.max_num_contacts)
@@ -104,10 +106,10 @@ class DataLoader:
             self.surface_normals = contact_global_normals.reshape(-1, 3 * self.max_num_contacts)
 
             # define the overall padding for contact ids, contact positions, forces and normals
-            self.global_contact_ids_paddings = self.global_contact_ids == -1000
-            self.contact_positions_paddings = self.contact_positions == -1000
-            self.contact_forces_paddings = self.contact_forces == -1000
-            self.surface_normals_paddings = self.surface_normals == -1000
+            self.global_contact_ids_paddings = self.global_contact_ids == padding_id
+            self.contact_positions_paddings = self.contact_positions == padding_id
+            self.contact_forces_paddings = self.contact_forces == padding_id
+            self.surface_normals_paddings = self.surface_normals == padding_id
 
             feasible_contact_positions = np.array(feasible_contact_positions, dtype=object)
             feasible_contact_forces = np.array(feasible_contact_forces, dtype=object)
@@ -286,8 +288,6 @@ class DataLoader:
                contact_nums_history
               
     # Function only for low level training 
-    # def sample_
-
     def retreive_nn_neibors(self, contact_ids: np.ndarray, k: int = 20) -> np.ndarray:
         """
         Retrieve the nearest k neighbors for each contact ID.
@@ -298,7 +298,6 @@ class DataLoader:
         link_names, mesh_ids, mesh_names = self.global_ids_to_link_mesh_names(contact_ids)
         
         # Retrieve the distance table for the corresponding mesh
-        import pdb; pdb.set_trace()
         distance_tables = self.get_distance_table(mesh_names)
         
         # Extract the nearest k contact IDs based on the distance table
