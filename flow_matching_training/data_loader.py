@@ -154,6 +154,10 @@ class DataLoader:
             self.eps = int(data["eps"])
             self.ep_len = int(data["ep_len"])
             print("=================== Loaded the preprocessed data")
+        self.training_steps = [0, self.total_steps // 10 * 9]  # take 9/10 data as training dataset
+        self.validation_steps = [self.total_steps // 10 * 9, self.total_steps]  # take 1/10 data as validation dataset
+        print(self.training_steps, self.validation_steps)
+        print("=================== Prepared training and validation steps finished")
 
     def _prepare_joint_data(self, limited_dim: int = -1):
         # flatten joint data except for the first dimension
@@ -252,9 +256,14 @@ class DataLoader:
         return self.get_data_from_dset(random_indices)
 
     # Function only for training high level
-    def sample_contact_ids_robot_state_history(self, batch_size: int, history_len: int = 5) -> Tensor:
-        global_random_indices = np.random.randint(0, self.total_steps, batch_size)
-        
+    def sample_contact_ids_robot_state_history(self, batch_size: int, history_len: int = 5, data_slice: str = "train") -> Tensor:
+        if data_slice == "train":
+            global_random_indices = np.random.randint(self.training_steps[0], self.training_steps[1], batch_size)
+        elif data_slice == "validate":
+            global_random_indices = np.random.randint(self.validation_steps[0], self.validation_steps[1], batch_size)
+        else:
+            raise ValueError(f"Unknown data_slice: {data_slice}")
+
         # retrieve the current one
         contact_ids, aug_state, contact_positions, contact_nums = self.get_data_from_dset(global_random_indices)
 
