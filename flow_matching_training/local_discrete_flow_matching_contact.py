@@ -10,12 +10,13 @@ from data_loader import DataLoader
 from discrete_flow_matching_moon import chi_square_test
 
 class DiscreteFlowLocal(nn.Module):
-    def __init__(self, num_offsets: int  = 21, dim: int = 1, h: int = 128, v: int = 128):
+    def __init__(self, num_offsets: int  = 21, dim: int = 1, h: int = 128, v: int = 128, aug_state_dim: int = 0):
         super().__init__()
         self.num_offsets = num_offsets # Store num_offsets
         self.embed = nn.Embedding(v, h)
+        input_size = dim * h + 1 + aug_state_dim  # t + embedding + aug_state
         self.net = nn.Sequential(
-            nn.Linear(dim * h + 1, h), nn.ELU(),
+            nn.Linear(input_size, h), nn.ELU(),
             nn.Linear(h, h), nn.ELU(),
             nn.Linear(h, h), nn.ELU(),
             nn.Linear(h, dim * num_offsets)
@@ -31,12 +32,13 @@ class DiscreteFlowLocal(nn.Module):
         return self.net(input_tensor).reshape(list(x_t.shape) + [self.num_offsets])
 
 class RescheduleDiscreteFlowLocal(nn.Module):
-    def __init__(self, num_offsets: int  = 21, dim: int = 1, h: int = 128, v: int = 128):
+    def __init__(self, num_offsets: int  = 21, dim: int = 1, h: int = 128, v: int = 128, aug_state_dim: int = 0):
         super().__init__()
         self.num_offsets = num_offsets # Store num_offsets
         self.embed = nn.Embedding(v, h)
+        input_size = dim * h + 1 + aug_state_dim  # t + embedding + aug_state
         self.net = nn.Sequential(
-            nn.Linear(dim * h + 1, h), nn.ELU(),
+            nn.Linear(input_size, h), nn.ELU(),
             nn.Linear(h, h), nn.ELU(),
             nn.Linear(h, h), nn.ELU(),
             nn.Linear(h, dim * num_offsets)
@@ -80,11 +82,14 @@ def get_nearest_neighbors(x_t: Tensor, table: Tensor) -> Tensor:
     row_candidates = table[x_t_flat]  # shape: (N, K)
     return row_candidates
 
-if __name__ == "__main__":    
+if __name__ == "__main__":   
+    # Load the dataset
+    d_loader = DataLoader("dataset_batch_1_1000eps")
+     
     # load hyperparameters from yaml file
     with open("config_contact.yaml", "r") as f:
         config = yaml.safe_load(f)
-    vocab_size = config.get("vocab_size", 128)
+    vocab_size = config.get("vocab_size", 11000)
     num_nearest_neibor = config.get("num_nearest_neibor", 41)
     num_offsets = num_nearest_neibor
     batch_size = config.get("batch_size")
@@ -98,17 +103,21 @@ if __name__ == "__main__":
     sample_step = config.get("sample_step")
     gap = (num_nearest_neibor - 1) // 2
     use_wnb = config.get("use_wnb")
-    max_contact_id = 1000  # Maximum contact ID for scaling    
+    max_contact_id = d_loader.max_contact_id  # Maximum contact ID for scaling
     table = generate_closest_indices_table(num_rows=vocab_size, num_closest=num_nearest_neibor)
-    condition = True
+    condition = False
     condition_str = "cond" if condition else ""
     reschedule_str = "R" if reschedule else ""
-    d_loader = DataLoader("dataset_1000eps_1_contact")
+    use_aug_state = True
+    if use_aug_state:
+        aug_state_dim = d_loader.joint_pos_data.shape[1] + d_loader.joint_vel_data.shape[1] + d_loader.joint_tau_cmd_data.shape[1] + d_loader.joint_tau_ext_gt_data.shape[1]
+    else:
+        aug_state_dim = 0
     
     if reschedule:
-        model = RescheduleDiscreteFlowLocal(num_offsets=num_offsets, v=vocab_size)
+        model = RescheduleDiscreteFlowLocal(num_offsets=num_offsets, v=vocab_size, dim=1, aug_state_dim=aug_state_dim)
     else:
-        model = DiscreteFlowLocal(num_offsets=num_offsets, v=vocab_size)
+        model = DiscreteFlowLocal(num_offsets=num_offsets, v=vocab_size, dim=1, aug_state_dim=aug_state_dim)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     file_name = f"local_discrete_flow_contact{num_epochs}_Vacob{vocab_size}_NN{num_nearest_neibor}_{condition_str}_{reschedule}.pth"
     file_path = f"models/{file_name}"
@@ -121,16 +130,16 @@ if __name__ == "__main__":
     reschedule_str = "Reschedule" if reschedule else ""
     enforce_str = "Enforce" if enforce else ""
     if use_wnb:
-        wnb.init(project="Contact Force Estimation", name=f"{enforce_str}{reschedule_str}LocalDiscreteFlowMatchingMoon")
+        wnb.init(project="Contact Force Estimation", name=f"{enforce_str}{reschedule_str}LocalDFContact_epo{num_epochs}")
         wnb.watch(model, log="all")
         wnb.config.update(config)
 
     for epoch in range(num_epochs):
         if not condition:
-            x_1 = d_loader.sample_contact_ids(batch_size, noise=0.05, max_contact_id=max_contact_id)
+            x_1, aug_state, c_pos = d_loader.sample_contact_ids_robot_state(batch_size)
             x_0 = torch.randint(low=0, high=vocab_size, size=(batch_size, ))
         else:
-            x_0, x_1 = d_loader.sample_contact_condition_ids(batch_size, noise=0.05, max_contact_id=max_contact_id)
+            raise NotImplementedError("Conditioning on previous contact ID is not implemented yet.")
 
         if not reschedule:
             # Original implementation: map the global 
@@ -180,7 +189,11 @@ if __name__ == "__main__":
                 x_t[t_is_one_positions] = x_1[t_is_one_positions]
             x_1_nearest_idx, targets_ = find_nearest_neibor_indexes(x_1, x_t, table)
 
-        logits = model(x_t, t)
+        if not use_aug_state:
+            logits = model(x_t, t)
+        else:
+            aug_state = aug_state.view(batch_size, -1)
+            logits = model(x_t=x_t, t=t, aug_state=aug_state)
         loss = nn.functional.cross_entropy(logits, x_1_nearest_idx).mean()
         optim.zero_grad()
         loss.backward()
@@ -200,15 +213,20 @@ if __name__ == "__main__":
     num_samples = 500
     if not condition:
         x_t = torch.randint(low=0, high=vocab_size, size=(num_samples, ))
+        x_1, aug_state, c_pos = d_loader.sample_contact_ids_robot_state(batch_size=num_samples)
     else:
-        x_t, _ = d_loader.sample_contact_condition_ids(num_samples, noise=0.0, max_contact_id=max_contact_id)
+        raise NotImplementedError("Conditioning on previous contact ID is not implemented yet.")
     t = 0.0
     results = [(x_t, t)]
     results_x_t = []
     h_c = sample_step / div
     while t < 1.0 - 1e-3:
         # Get predicted probabilities over offsets
-        p1 = torch.softmax(model(x_t, torch.ones(num_samples) * t), dim=-1)
+        # p1 = torch.softmax(model(x_t, torch.ones(num_samples) * t), dim=-1)
+        if not use_aug_state:
+            p1 = torch.softmax(model(x_t, torch.ones(num_samples) * t), dim=-1)
+        else:
+            p1 = torch.softmax(model(x_t, torch.ones(num_samples) * t, aug_state=aug_state), dim=-1)
 
         # Sample an offset index for each element and dimension
         sampled_nn_indices = torch.distributions.Categorical(probs=p1).sample()
@@ -224,21 +242,33 @@ if __name__ == "__main__":
         results.append((x_t, t))
         results_x_t.append(x_t)
 
-    # visualize the results in wandb
-    results = torch.stack(results_x_t)
-    results = results.flatten()
-    if not condition:
-        dset_x1 = d_loader.sample_contact_ids(len(results), noise=0.0, max_contact_id=max_contact_id)
-    else:
-        _, dset_x1 = d_loader.sample_contact_condition_ids(len(results), noise=0.0, max_contact_id=max_contact_id)
-    chi2, p = chi_square_test(dset_x1.numpy(), results.numpy())
+    # Compare the bar plot of the sampled contact IDs and the original contact IDs
+    final_results_x_t = torch.stack([results_x_t[-1]])
+    final_results_x_t = final_results_x_t.flatten()
+    init_results_x_t = torch.stack([results_x_t[0]])
+    init_results_x_t = init_results_x_t.flatten()
+    
+    # Compute the prediction error, sums up the total number of predicted contact IDs
+    correct_predictions = (final_results_x_t == x_1).sum().item()
+    total_predictions = final_results_x_t.shape[0]
+    accuracy = correct_predictions / total_predictions
+
+    corrent_predictions_init = (init_results_x_t == x_1).sum().item()
+    total_predictions_init = init_results_x_t.shape[0]
+    accuracy_init = corrent_predictions_init / total_predictions_init
+    print(f"Initial accuracy of contact IDs: {accuracy_init * 100:.2f}%")
+    print(f"Accuracy of sampled contact IDs: {accuracy * 100:.2f}%")
+    
+    # table = [final_results_x_t.numpy(), dset_x1.numpy()]
+    chi2, p = chi_square_test(x_1.numpy(), final_results_x_t.numpy())
+    
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
-    plt.hist(results.numpy(), bins=50, label='Sampled Contact IDs')
-    plt.hist(dset_x1.numpy(), bins=50, label='Original Contact IDs')
+    plt.hist(final_results_x_t.numpy(), bins=50, label='Sampled Contact IDs', density=True)
+    plt.hist(x_1.numpy(), bins=50, label='Original Contact IDs', density=True)
     plt.title('Distribution of Contact IDs')
     plt.xlabel('Contact ID')
     plt.ylabel('Frequency')
-    plt.legend()
+    plt.legend()    
     plt.tight_layout()
     plt.show()

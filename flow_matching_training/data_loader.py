@@ -99,7 +99,6 @@ class DataLoader:
                 contact_global_forces = np.concatenate((contact_global_forces, padding), axis=2)
                 padding = np.full((contact_global_normals.shape[0], contact_global_normals.shape[1], self.max_num_contacts - contact_global_normals.shape[2], 3), padding_id, dtype=float)
                 contact_global_normals = np.concatenate((contact_global_normals, padding), axis=2)
-            # import pdb; pdb.set_trace()
             self.global_contact_ids = contact_global_ids.reshape(-1, self.max_num_contacts)
             self.contact_positions = contact_global_positions.reshape(-1, 3 * self.max_num_contacts)
             self.contact_forces = contact_global_forces.reshape(-1, 3 * self.max_num_contacts)
@@ -452,13 +451,41 @@ class DataLoader:
 
 if __name__ == "__main__":
     file_name = "dataset_batch_1_1000eps"
-    dir_name = "data-link7-1-2-contact_v3"
+    dir_name = "data-link7-2-contact_v3"
     d_loader = DataLoader(file_name, dir_name)
     batch_size = 1000
     c_ids, aug_state, contact_positions, contact_nums = d_loader.sample_contact_ids_robot_state(batch_size=batch_size)
     print(f"Sampled contact ID min: {c_ids.min().item()}, max: {c_ids.max().item()}")
     print(c_ids.shape, aug_state.shape, contact_positions.shape)
     
+    c_ids, aug_state, contact_positions, contact_nums, \
+    c_ids_history, aug_state_history, contact_positions_history, contact_nums_history = \
+        d_loader.sample_contact_ids_robot_state_history(batch_size=100000, history_len=5)
+    
+    # # visualize the dataset in 3d
+    # padding_id = d_loader.max_contact_id + 1
+    # contact_positions_mask = contact_positions == padding_id
+    # contact_positions = contact_positions[~contact_positions_mask].reshape(-1, 3)
+    # import matplotlib.pyplot as plt
+    # fig = plt.figure(figsize=(10, 10))
+    # ax = fig.add_subplot(111, projection='3d')
+    # ax.scatter(contact_positions[:, 0], contact_positions[:, 1], contact_positions[:, 2])
+    # plt.show()
+
+    # visualize the sampling space
+    start_end_idx = d_loader.data_dict["global_start_end_indices"]
+    print(start_end_idx)
+    link_7_idx = start_end_idx[-1]
+    x_t = np.random.randint(low=link_7_idx[0], high=link_7_idx[1], size=(100000,))
+    c_pos = d_loader.retrieve_contact_pos_from_ids(x_t)
+
+    # visualize contact positions in 3d
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(c_pos[:, 0], c_pos[:, 1], c_pos[:, 2])
+    plt.show()
+
     # # TODO: debug for retrieve nearest neighbors
     # nearest_contact_positions, geodesic_distances = d_loader.retreive_nn_neibors(c_ids.numpy(), k=20)
     # print(f"Nearest contact positions shape: {nearest_contact_positions.shape}")
