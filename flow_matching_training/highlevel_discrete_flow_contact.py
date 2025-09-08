@@ -83,7 +83,7 @@ class DiscreteFlowHistory(nn.Module):
 if __name__ == "__main__":    
     # Load the dataset
     file_name = "dataset_batch_1_1000eps"
-    dir_name = "data-link7-1-2-contact_v3"
+    dir_name = "data-link7-2-contact_v3"
     d_loader = DataLoader(file_name, dir_name)
     
     # Get the device
@@ -125,7 +125,7 @@ if __name__ == "__main__":
         # Sample data from loader
         _, aug_state, c_pos, contact_nums, \
         _, aug_state_history, c_pos_history, contact_nums_history \
-        = d_loader.sample_contact_ids_robot_state_history(batch_size, history_len=his_len)
+        = d_loader.sample_contact_ids_robot_state_history(batch_size, history_len=his_len, data_slice="train")
         aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
         # Convert all data to tensors on the correct device
         contact_nums = torch.tensor(contact_nums, device=device, dtype=torch.long)
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     # Get new data for sampling
     _, aug_state, c_pos, contact_nums, \
     _, aug_state_history, c_pos_history, contact_nums_history \
-    = d_loader.sample_contact_ids_robot_state_history(num_samples, history_len=his_len)
+    = d_loader.sample_contact_ids_robot_state_history(num_samples, history_len=his_len, data_slice="validate")
     aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
     aug_state_aug_history = torch.tensor(aug_state_aug_history, device=device, dtype=torch.float32)
     contact_nums_history = torch.tensor(contact_nums_history, device=device, dtype=torch.long)
