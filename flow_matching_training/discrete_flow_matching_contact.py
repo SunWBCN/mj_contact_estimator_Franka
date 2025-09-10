@@ -153,8 +153,6 @@ class DiscreteFlowSeqHistory(nn.Module):
         # global conditioning: time + current state
         x = tok + self.time_proj(t[:, None]).unsqueeze(1)          # [B,1,h] -> broadcast
         if self.aug_now_proj is not None and (aug_state is not None):
-            # normalize aug_state before entering neural network
-            aug_state = (aug_state - aug_state.mean(dim=1, keepdim=True)) / (aug_state.std(dim=1, keepdim=True) + 1e-6)
             x = x + self.aug_now_proj(aug_state).unsqueeze(1)  # [B,1,h]
 
         # # global state history
@@ -165,8 +163,7 @@ class DiscreteFlowSeqHistory(nn.Module):
         # contact position conditioning
         if self.use_c_pos and c_pos is not None:
             # c_pos should be [B, C*3] -> project to [B, h] then broadcast to [B, C, h]
-            # normalize c_pos before entering neural network
-            c_pos = (c_pos - c_pos.mean(dim=1, keepdim=True)) / (c_pos.std(dim=1, keepdim=True) + 1e-6)
+            # c_pos = (c_pos - c_pos.mean(dim=1, keepdim=True)) / (c_pos.std(dim=1, keepdim=True) + 1e-6)
             c_pos_emb = self.c_pos_proj(c_pos)  # [B, h]
             c_pos_emb = c_pos_emb.unsqueeze(1)  # [B, 1, h] 
             x = x + c_pos_emb  # Broadcasting: [B, C, h] + [B, 1, h] -> [B, C, h]
@@ -177,13 +174,61 @@ class DiscreteFlowSeqHistory(nn.Module):
         # per-position logits over full vocab (incl PAD/EOS; you’ll block PAD at sampling)
         logits = self.fc_out(enc)                                   # [B,C,V_total]
         return logits
+
+def contactN2linkid(contact_num):
+    linkids = []
+    for i in range(len(contact_num)):
+        c_n = contact_num[i]
+        linkid = np.zeros(10, dtype=int)
+        for j in range(len(c_n)):
+            n_j = c_n[j]
+            for n in range(n_j):
+                linkid[n] = j
+        linkids.append(linkid)
+    linkids = np.array(linkids)
+    return linkids
+
+def get_samples(batch_size, history_len, data_slice="train"):
+    # retrieve samples from dataset, note that each variable is a numpy array
+    contact_id, aug_state, c_pos, contact_nums, \
+    contact_id_history, aug_state_history, c_pos_history, contact_nums_history \
+    = d_loader.sample_contact_ids_robot_state_history(batch_size, history_len=history_len, data_slice=data_slice)    
     
+    # augmented state features
+    aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
+    aug_state_aug_history = torch.tensor(aug_state_aug_history, device=device, dtype=torch.float32)
+    aug_state = torch.tensor(aug_state, device=device, dtype=torch.float32)
+    
+    # padding mask
+    pad_mask = contact_id == PAD_ID
+    pad_mask = pad_mask.to(device)
+
+    # linkid embeddings
+    linkids = contactN2linkid(contact_nums)
+    linkids = torch.tensor(linkids, device=device, dtype=torch.long)
+    return contact_id, aug_state, aug_state_aug_history, c_pos, contact_nums, pad_mask, linkids
+
+def compute_cpos_particles(c_pos, pad_mask, x_t, sample_size):
+    # Replace your training section starting from the c_pos_x_t_tmp line
+    # instead of current contact positions
+    c_pos_x_t_tmp = torch.zeros_like(c_pos, device=device, dtype=torch.float32)
+    pos_pad = pad_mask.unsqueeze(-1).expand(-1, -1, 3)  # Shape: [B, C, 3]
+    pos_pad = pos_pad.reshape(sample_size, -1)
+
+    # Get positions for non-PAD contact IDs
+    non_pad_positions = torch.where(~pad_mask)
+    non_pad_contact_ids = x_t[non_pad_positions].cpu().numpy().tolist()
+    retrieved_positions = d_loader.retrieve_contact_pos_from_ids(non_pad_contact_ids)
+    retrieved_tensor = torch.tensor(retrieved_positions, device=device, dtype=torch.float32)
+    c_pos_x_t_tmp[~pos_pad] = retrieved_tensor.flatten()
+    return c_pos_x_t_tmp
+
 if __name__ == "__main__":
     # Make sure JAX uses CPU
     os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
     # Load the dataset
-    file_name = "dataset_batch_1_1000eps"
+    file_name = "dataset_batch_1_20eps"
     dir_name = "data-link7-2-contact_v3"
     d_loader = DataLoader(file_name, dir_name)
     
@@ -191,9 +236,9 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     # Training
-    batch_size = 2048
+    batch_size = 256
     lr = 0.001
-    num_epochs = 10000
+    num_epochs = 1000
     max_contact_id = d_loader.max_contact_id
     vocab_size = int(max_contact_id) + 1 
     PAD_ID = vocab_size
@@ -242,15 +287,10 @@ if __name__ == "__main__":
         for epoch in trange(num_epochs):
             # clean cpu cache
             torch.cuda.empty_cache()
+            contact_id, aug_state, aug_state_aug_history, c_pos, \
+            contact_nums, pad_mask, link_ids = \
+            get_samples(batch_size, his_len, data_slice="train")
 
-            contact_id, aug_state, c_pos, contact_nums, \
-            contact_id_history, aug_state_history, c_pos_history, contact_nums_history \
-            = d_loader.sample_contact_ids_robot_state_history(batch_size, history_len=his_len, data_slice="train")
-            pad_mask = contact_id == PAD_ID
-            aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
-            aug_state_aug_history = torch.tensor(aug_state_aug_history, device=device, dtype=torch.float32)
-            pad_mask = pad_mask.to(device)
-            
             x_1 = contact_id
             x_1 = x_1.to(device)
 
@@ -262,22 +302,12 @@ if __name__ == "__main__":
             # create x_t by sampling from x_1 and x_0
             x_t = torch.where(torch.rand(batch_size, x_1.shape[1], device=device) < t[:, None], x_1, x_0)
 
-            # Replace your training section starting from the c_pos_x_t_tmp line:
-            c_pos_x_t_tmp = torch.zeros_like(c_pos, device=device, dtype=torch.float32)
-            pos_pad = pad_mask.unsqueeze(-1).expand(-1, -1, 3)  # Shape: [B, C, 3]
-            pos_pad = pos_pad.reshape(batch_size, -1)
-
-            # Get positions for non-PAD contact IDs
-            non_pad_positions = torch.where(~pad_mask)
-            non_pad_contact_ids = x_t[non_pad_positions].cpu().numpy().tolist()
-            retrieved_positions = d_loader.retrieve_contact_pos_from_ids(non_pad_contact_ids)
-            retrieved_tensor = torch.tensor(retrieved_positions, device=device, dtype=torch.float32)
-            c_pos_x_t_tmp[~pos_pad] = retrieved_tensor.flatten()
+            # retrieve the contact positions for x_t
+            c_pos_x_t = compute_cpos_particles(c_pos, pad_mask, x_t, batch_size)
             
             # sample also contact positions history, retreive the pad_mask for it and fill with all 0
-            logits = model(x_t=x_t, t=t, aug_state=aug_state_aug_history, pad_mask=pad_mask, c_pos=c_pos_x_t_tmp,
-                           )
-            
+            logits = model(x_t=x_t, t=t, aug_state=aug_state_aug_history, pad_mask=pad_mask)
+
             # what is the loss
             loss = nn.functional.cross_entropy(
                 logits.view(-1, V_total), 
@@ -297,26 +327,24 @@ if __name__ == "__main__":
         # save the model
         torch.save(model.state_dict(), model_path)
 
-    num_test = 1000
+    num_test = 100
     correct_total = 0
-    vis_result = False
-    mode = "train"
+    avg_err = 0.0
+    vis_result = True
+    mode = "validate"
+    min_val = int(link_7_sampling_space[0])
+    max_val = int(link_7_sampling_space[1]) - 1
     
     # Sampling, test with 100 samples
     for i in range(num_test):
         num_samples = 400
-        contact_id, aug_state, c_pos, contact_nums, \
-        contact_id_history, aug_state_history, c_pos_history, contact_nums_history \
-        = d_loader.sample_contact_ids_robot_state_history(num_samples, history_len=his_len, data_slice=mode)
-        pad_mask = contact_id == PAD_ID
-        aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
-        aug_state_aug_history = torch.tensor(aug_state_aug_history, device=device, dtype=torch.float32)
-        pad_mask = pad_mask.to(device)
-        
-        aug_state = aug_state.to(device)
+        contact_id, aug_state, aug_state_aug_history, c_pos, \
+        contact_nums, pad_mask, link_ids = \
+        get_samples(num_samples, his_len, data_slice=mode)
+
         x_1 = contact_id
         x_1 = x_1.to(device)
-        
+
         # get the first one
         random_idx = np.random.randint(0, contact_id.shape[0])
         x_1_0 = x_1[random_idx]
@@ -334,6 +362,8 @@ if __name__ == "__main__":
         x_1_mask = x_1 == PAD_ID
         n_contacts = len(x_1_0[~x_1_0_mask])
         print("Number of contacts:", n_contacts)
+        if n_contacts == 0:
+            continue
 
         # generate random x_t
         x_t = torch.randint(low=link_7_sampling_space[0], high=link_7_sampling_space[1], size=(contact_id.shape[0], contact_id.shape[1]), device=device)
@@ -351,13 +381,16 @@ if __name__ == "__main__":
         )
         x_t_c_pos = x_t_c_pos.reshape(num_samples, n_contacts, 3)
         results_c_pos = [x_t_c_pos.copy()]
-        
+
+        # Retrieve the contact positions for x_t
+        c_pos_x_t = compute_cpos_particles(c_pos, pad_mask, x_t, num_samples)
+
         print("Starting sampling...")
         with torch.no_grad():
             while t < 1.0 - 1e-3:
                 t_tensor = torch.full((num_samples,), t, device=device)
                 logits = model(x_t=x_t, t=t_tensor, aug_state=aug_state_aug_history, pad_mask=pad_mask)
-                
+
                 # CRITICAL: Mask PAD token logits to prevent predicting PAD where it shouldn't be
                 logits[:, :, PAD_ID] = torch.where(
                     pad_mask,  # Where current positions are PAD
@@ -382,6 +415,9 @@ if __name__ == "__main__":
                 # Sample new tokens
                 x_t_new = torch.distributions.Categorical(probs=updated_probs).sample()
                 
+                # limit the sampling to the link 7 sampling space
+                x_t_new = torch.clamp(x_t_new, min=min_val, max=max_val)
+
                 # Preserve existing PAD tokens (crucial!)
                 x_t = torch.where(pad_mask, PAD_ID, x_t_new)
                 
@@ -403,12 +439,12 @@ if __name__ == "__main__":
 
         correct_init = (init_predict == x_1) & (~pad_mask)
         accuracy_init = correct_init.float().mean().item()
-        print(f"Initial predicted accuracy: {accuracy_init:.4f}")
+        # print(f"Initial predicted accuracy: {accuracy_init:.4f}")
         
         # compute the predicted accuracy
         correct = (final_predict == x_1) & (~pad_mask)
         accuracy = correct.float().mean().item()
-        print(f"Final predicted accuracy: {accuracy:.4f}")
+        # print(f"Final predicted accuracy: {accuracy:.4f}")
         
         # get the feasible ids
         feasible_ids = final_predict[~pad_mask]
