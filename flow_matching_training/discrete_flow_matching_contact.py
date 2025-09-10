@@ -11,168 +11,113 @@ import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 
 # You choose these IDs; example uses “append-on-top” (no shift of real IDs):
-# real tokens: 0..V_real-1, EOS = V_real, PAD = V_real+1
+# real tokens: 0..V_real-1, PAD = V_real
 class DiscreteFlowSeqHistory(nn.Module):
     def __init__(self,
-                 V_total: int,
+                 V_total,
                  h: int = 64,
-                 aug_state_dim: int = 0,
+                 num_links: int = None,
+                 token_feat_dim: int = 0, 
                  n_heads: int = 4,
                  n_layers: int = 2,
-                 use_token_feats: bool = True,     # per-token numeric feats (e.g., xyz) + link ids
-                 token_feat_dim: int = 0,          # numeric feats per token (e.g., 3 for xyz)
-                 num_links: int | None = None,     # set if you pass link ids per token
-                 use_token_hist: bool = False,     # per-token ID history [B,H,C]
-                 use_state_hist: bool = False,     # global state history [B,H,D]
-                 hist_len: int = 100,
+                 aug_state_dim: int = 0,
                  max_c_num: int = 10,
-                 use_c_pos: bool = True,     # contact position history [B,C*3]
-                 PAD_ID: int = None):              # set to V_real
+                 use_c_pos: bool = False,
+                 use_concat: bool = False,
+                 use_token_feats: bool = True,
+                 PAD_ID: int = None):  # Add use_concat flag
         super().__init__()
-        assert PAD_ID is not None
-        self.h        = h
-        self.V_total  = V_total
-        self.PAD_ID   = PAD_ID
-        self.use_token_feats = use_token_feats
-        self.token_feat_dim  = token_feat_dim
-        self.use_token_hist  = use_token_hist
-        self.use_state_hist  = use_state_hist
-        self.has_link_ids    = num_links is not None
         self.use_c_pos = use_c_pos
-        self.max_c_num = max_c_num
+        self.use_concat = use_concat
+        self.use_token_feats = use_token_feats
+        self.has_link_ids = num_links is not None
 
-        # Token embedding (PAD row will be zeroed by padding_idx)
+        # Calculate total embedding dimension
+        total_dim = h  # Base token embedding
+        if use_concat:
+            if token_feat_dim > 0:
+                total_dim += h  # Add h for token features
+            if num_links is not None:
+                total_dim += h  # Add h for link embeddings
+        self.total_embedding_dim = total_dim
+        
+        # Base embeddings (same as before)
         self.token_embed = nn.Embedding(V_total, h, padding_idx=PAD_ID)
-
-        # Transformer over the sequence (batch_first=True)
-        enc_layer = nn.TransformerEncoderLayer(d_model=h, nhead=n_heads,
-                                               dim_feedforward=4*h, batch_first=True)
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
-
-        # Sinusoidal positional encoding (created on the fly)
-        # (no learnable params; tiny helper below)
-        # ---- Conditioning: time + current state ----
-        self.time_proj     = nn.Linear(1, h)
-        self.aug_now_proj  = nn.Linear(aug_state_dim, h) if aug_state_dim > 0 else None
-
-        # Optional per-token features
-        if use_token_feats and token_feat_dim > 0:
+        
+        if token_feat_dim > 0:
             self.token_feat_proj = nn.Linear(token_feat_dim, h)
-        if use_token_feats and self.has_link_ids:
+        if num_links is not None:
             self.link_embed = nn.Embedding(num_links, h)
+        
+        # Transformer needs to handle the new dimension
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=total_dim,  # Use total_dim instead of h
+            nhead=n_heads,
+            dim_feedforward=4*total_dim,  # Scale accordingly
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        
+        # Update other projections to match new dimension
+        self.time_proj = nn.Linear(1, total_dim)
+        self.aug_now_proj = nn.Linear(aug_state_dim, total_dim) if aug_state_dim > 0 else None
+        self.c_pos_proj = nn.Linear(3 * max_c_num, total_dim) if use_c_pos else None
+        
+        # Output projection
+        self.fc_out = nn.Linear(total_dim, V_total)
 
-        # Optional per-token ID history pooling (attention over H)
-        if use_token_hist:
-            self.hist_token_embed = nn.Embedding(V_total, h, padding_idx=PAD_ID)
-            self.hist_token_score = nn.Linear(h, 1)
-
-        # Optional global state history pooling (attention over H)
-        if use_state_hist and aug_state_dim > 0:
-            self.state_hist_proj  = nn.Linear(aug_state_dim, h)
-            self.state_hist_score = nn.Linear(h, 1)
-            self.state_hist_gate  = nn.Parameter(torch.tensor(1.0))
-
-        # Optional contact position pooling
-        if use_c_pos:
-            self.c_pos_proj = nn.Linear(3 * max_c_num, h)
-            self.c_pos_score = nn.Linear(h, 1)
-
-        # Output head
-        self.fc_out = nn.Linear(h, V_total)
-
-    # --- sinusoidal positions ---
-    def sinusoidal_pos(self, L: int, device) -> torch.Tensor:
-        d = self.h
-        pos = torch.arange(L, device=device, dtype=torch.float32).unsqueeze(1)     # [L,1]
-        i   = torch.arange(d, device=device, dtype=torch.float32).unsqueeze(0)     # [1,d]
-        denom = torch.pow(10000.0, (i//2)*2.0/d)
-        emb = pos / denom
-        emb[:, 0::2] = torch.sin(emb[:, 0::2])
-        emb[:, 1::2] = torch.cos(emb[:, 1::2])
-        return emb.unsqueeze(0)   # [1, L, h]
-
-    # --- per-token history pooling over H (masked by pad_mask over C) ---
-    def pool_token_hist(self, contact_ids_hist: torch.LongTensor,
-                        pad_mask: torch.BoolTensor) -> torch.Tensor:
-        # contact_ids_hist: [B, H, C] (model IDs incl PAD/EOS)
-        B, H, C = contact_ids_hist.shape
-        vecs = self.hist_token_embed(contact_ids_hist)             # [B,H,C,h]
-
-        # kill entire columns where the current sequence position is PAD
-        vecs = vecs.masked_fill(pad_mask.unsqueeze(1).unsqueeze(-1), 0.0)
-
-        scores = self.hist_token_score(vecs).squeeze(-1)           # [B,H,C]
-        scores = scores.masked_fill(pad_mask.unsqueeze(1), -1e9)
-        weights = torch.softmax(scores, dim=1)                     # [B,H,C]
-        pooled  = (weights.unsqueeze(-1) * vecs).sum(dim=1)        # [B,C,h]
-        pooled  = pooled * (~pad_mask).unsqueeze(-1).float()
-        return pooled
-
-    # --- global state history pooling over H ---
-    def pool_state_hist(self, aug_state_hist: torch.Tensor) -> torch.Tensor:
-        # aug_state_hist: [B, H, D]
-        sh = self.state_hist_proj(aug_state_hist)                  # [B,H,h]
-        scores  = self.state_hist_score(sh).squeeze(-1)            # [B,H]
-        weights = torch.softmax(scores, dim=1)                     # [B,H]
-        pooled  = (weights.unsqueeze(-1) * sh).sum(dim=1)          # [B,h]
-        return self.state_hist_gate * pooled                       # [B,h]
-
-    def forward(self,
-                x_t: torch.LongTensor,        # [B, C] (model IDs incl PAD/EOS)
-                t: torch.FloatTensor,             # [B]
-                aug_state: torch.FloatTensor | None,   # [B, D] or None
-                pad_mask: torch.BoolTensor,       # [B, C]  True=PAD
-                token_feats: torch.FloatTensor | None = None,      # [B, C, F] (numeric), optional
-                token_link_ids: torch.LongTensor | None = None,     # [B, C] (ints), optional
-                contact_ids_hist: torch.LongTensor | None = None,   # [B, H, C] (model IDs), optional
-                c_pos: torch.FloatTensor | None = None,     # [B, 3 * C], optional
-                # aug_state_hist: torch.FloatTensor | None = None     # [B, H, D], optional
-                ) -> torch.Tensor:
+    def forward(self, x_t, t, aug_state, pad_mask, token_feats=None, 
+                token_link_ids=None, **kwargs):
         B, C = x_t.shape
         device = x_t.device
-
-        # base token + sinusoidal pos
-        tok = self.token_embed(x_t)                            # [B,C,h]
-        # pos = self.sinusoidal_pos(C, device).expand(B, -1, -1)     # [B,C,h]
-        # tok = tok + pos
-
-        # add optional per-token numeric feats
-        if self.use_token_feats and token_feats is not None and token_feats.shape[-1] > 0:
-            feat_emb = self.token_feat_proj(token_feats)           # [B,C,h]
-            tok = tok + feat_emb
-
-        # add optional per-token link embeddings
-        if self.use_token_feats and self.has_link_ids and (token_link_ids is not None):
-            link_emb = self.link_embed(token_link_ids.clamp_min(0))# [B,C,h]
-            tok = tok + link_emb
-
-        # per-token ID history
-        if self.use_token_hist and (contact_ids_hist is not None):
-            tok = tok + self.pool_token_hist(contact_ids_hist, pad_mask)   # [B,C,h]
-
-        # global conditioning: time + current state
-        x = tok + self.time_proj(t[:, None]).unsqueeze(1)          # [B,1,h] -> broadcast
-        if self.aug_now_proj is not None and (aug_state is not None):
-            x = x + self.aug_now_proj(aug_state).unsqueeze(1)  # [B,1,h]
-
-        # # global state history
-        # if self.use_state_hist and (aug_state_hist is not None):
-        #     glob = self.pool_state_hist(aug_state_hist).unsqueeze(1)   # [B,1,h]
-        #     x = x + glob
-
-        # contact position conditioning
+        
+        if self.use_concat:
+            # Concatenation approach - extend dimensions
+            embeddings_list = []
+            
+            # Base token embedding
+            tok = self.token_embed(x_t)  # [B,C,h]
+            embeddings_list.append(tok)
+            
+            # Token features
+            if self.use_token_feats and token_feats is not None and token_feats.shape[-1] > 0:
+                feat_emb = self.token_feat_proj(token_feats)  # [B,C,h]
+                embeddings_list.append(feat_emb)
+            
+            # Link embeddings  
+            if self.has_link_ids and token_link_ids is not None:
+                link_emb = self.link_embed(token_link_ids.clamp_min(0))  # [B,C,h]
+                embeddings_list.append(link_emb)
+            
+            # Concatenate all embeddings
+            x = torch.cat(embeddings_list, dim=-1)  # [B,C,total_dim]
+            
+        else:
+            # Original summation approach
+            tok = self.token_embed(x_t)  # [B,C,h]
+            if self.use_token_feats and token_feats is not None:
+                feat_emb = self.token_feat_proj(token_feats)
+                tok = tok + feat_emb
+            if self.has_link_ids and token_link_ids is not None:
+                link_emb = self.link_embed(token_link_ids.clamp_min(0))
+                tok = tok + link_emb
+            x = tok  # [B,C,h]
+        
+        # Add time and state conditioning (broadcast to match new dimension)
+        x = x + self.time_proj(t[:, None]).unsqueeze(1)  # [B,1,total_dim]
+        if self.aug_now_proj is not None and aug_state is not None:
+            x = x + self.aug_now_proj(aug_state).unsqueeze(1)  # [B,1,total_dim]
+        
+        # Contact position conditioning
         if self.use_c_pos and c_pos is not None:
-            # c_pos should be [B, C*3] -> project to [B, h] then broadcast to [B, C, h]
-            # c_pos = (c_pos - c_pos.mean(dim=1, keepdim=True)) / (c_pos.std(dim=1, keepdim=True) + 1e-6)
-            c_pos_emb = self.c_pos_proj(c_pos)  # [B, h]
-            c_pos_emb = c_pos_emb.unsqueeze(1)  # [B, 1, h] 
-            x = x + c_pos_emb  # Broadcasting: [B, C, h] + [B, 1, h] -> [B, C, h]
-
-        # self-attention across sequence, masking PAD positions
-        enc = self.encoder(x, src_key_padding_mask=pad_mask)       # [B,C,h]
-
-        # per-position logits over full vocab (incl PAD/EOS; you’ll block PAD at sampling)
-        logits = self.fc_out(enc)                                   # [B,C,V_total]
+            c_pos_emb = self.c_pos_proj(c_pos).unsqueeze(1)  # [B,1,total_dim]
+            x = x + c_pos_emb
+        
+        # Transformer encoder
+        enc = self.encoder(x, src_key_padding_mask=pad_mask)  # [B,C,total_dim]
+        
+        # Output logits
+        logits = self.fc_out(enc)  # [B,C,V_total]
         return logits
 
 def contactN2linkid(contact_num):
@@ -262,7 +207,8 @@ if __name__ == "__main__":
     print(f"Augmented state dimension: {aug_state_dim}")
 
     # Define model    
-    model = DiscreteFlowSeqHistory(V_total=V_total, aug_state_dim=aug_state_dim, PAD_ID=PAD_ID, num_links=7)
+    model = DiscreteFlowSeqHistory(V_total=V_total, aug_state_dim=aug_state_dim, PAD_ID=PAD_ID, num_links=7,
+                                   use_token_feats=False, use_concat=True)
     model = model.to(device)
     
     # load the model if it exists
@@ -332,7 +278,7 @@ if __name__ == "__main__":
     correct_total = 0
     avg_err = 0.0
     vis_result = False
-    mode = "validate"
+    mode = "train"
     min_val = int(link_7_sampling_space[0])
     max_val = int(link_7_sampling_space[1]) - 1
     
