@@ -262,7 +262,7 @@ if __name__ == "__main__":
     print(f"Augmented state dimension: {aug_state_dim}")
 
     # Define model    
-    model = DiscreteFlowSeqHistory(V_total=V_total, aug_state_dim=aug_state_dim, PAD_ID=PAD_ID)
+    model = DiscreteFlowSeqHistory(V_total=V_total, aug_state_dim=aug_state_dim, PAD_ID=PAD_ID, num_links=7)
     model = model.to(device)
     
     # load the model if it exists
@@ -306,7 +306,8 @@ if __name__ == "__main__":
             c_pos_x_t = compute_cpos_particles(c_pos, pad_mask, x_t, batch_size)
             
             # sample also contact positions history, retreive the pad_mask for it and fill with all 0
-            logits = model(x_t=x_t, t=t, aug_state=aug_state_aug_history, pad_mask=pad_mask)
+            logits = model(x_t=x_t, t=t, aug_state=aug_state_aug_history, \
+                           pad_mask=pad_mask, token_link_ids=link_ids)
 
             # what is the loss
             loss = nn.functional.cross_entropy(
@@ -330,7 +331,7 @@ if __name__ == "__main__":
     num_test = 100
     correct_total = 0
     avg_err = 0.0
-    vis_result = True
+    vis_result = False
     mode = "validate"
     min_val = int(link_7_sampling_space[0])
     max_val = int(link_7_sampling_space[1]) - 1
@@ -389,7 +390,8 @@ if __name__ == "__main__":
         with torch.no_grad():
             while t < 1.0 - 1e-3:
                 t_tensor = torch.full((num_samples,), t, device=device)
-                logits = model(x_t=x_t, t=t_tensor, aug_state=aug_state_aug_history, pad_mask=pad_mask)
+                logits = model(x_t=x_t, t=t_tensor, aug_state=aug_state_aug_history, \
+                               pad_mask=pad_mask, token_link_ids=link_ids)
 
                 # CRITICAL: Mask PAD token logits to prevent predicting PAD where it shouldn't be
                 logits[:, :, PAD_ID] = torch.where(
