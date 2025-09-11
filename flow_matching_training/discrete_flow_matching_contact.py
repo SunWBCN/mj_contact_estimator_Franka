@@ -25,6 +25,7 @@ class DiscreteFlowSeqHistory(nn.Module):
                  use_c_pos: bool = False,
                  use_concat: bool = False,
                  use_token_feats: bool = True,
+                 use_state_history: bool = False,
                  PAD_ID: int = None):  # Add use_concat flag
         super().__init__()
         self.use_c_pos = use_c_pos
@@ -65,6 +66,15 @@ class DiscreteFlowSeqHistory(nn.Module):
         
         # Output projection
         self.fc_out = nn.Linear(total_dim, V_total)
+
+        if use_state_history:
+            self.state_hist_attention = nn.MultiheadAttention(
+                embed_dim=aug_state_dim,  # Use original state dim for attention
+                num_heads=4,
+                batch_first=True
+            )
+            self.state_hist_proj = nn.Linear(aug_state_dim, total_dim)
+            self.state_hist_gate = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, x_t, t, aug_state, pad_mask, token_feats=None, 
                 token_link_ids=None, **kwargs):
@@ -108,6 +118,11 @@ class DiscreteFlowSeqHistory(nn.Module):
         if self.aug_now_proj is not None and aug_state is not None:
             x = x + self.aug_now_proj(aug_state).unsqueeze(1)  # [B,1,total_dim]
         
+        if self.state_hist_attention and 'aug_state_history' in kwargs:
+            aug_state_history = kwargs['aug_state_history']
+            state_hist_emb = self.attend_state_history(aug_state_history)  # [B,total_dim]
+            x = x + state_hist_emb.unsqueeze(1)  # [B,1,total_dim]
+
         # Contact position conditioning
         if self.use_c_pos and c_pos is not None:
             c_pos_emb = self.c_pos_proj(c_pos).unsqueeze(1)  # [B,1,total_dim]
@@ -119,6 +134,28 @@ class DiscreteFlowSeqHistory(nn.Module):
         # Output logits
         logits = self.fc_out(enc)  # [B,C,V_total]
         return logits
+    
+    def attend_state_history(self, aug_state_history):
+        """
+        Attend over robot state history
+        Input: aug_state_history [B, H, d]
+        Output: [B, total_dim] - aggregated history features
+        """
+        B, H, d = aug_state_history.shape
+        
+        # Self-attention over history sequence
+        attended_history, _ = self.state_hist_attention(
+            query=aug_state_history,      # [B, H, d]
+            key=aug_state_history,        # [B, H, d] 
+            value=aug_state_history       # [B, H, d]
+        )  # Output: [B, H, d]
+        
+        # Aggregate over history dimension
+        pooled_history = attended_history.mean(dim=1)  # [B, d]
+        
+        # Project to model dimension and gate
+        projected = self.state_hist_proj(pooled_history)  # [B, total_dim]
+        return self.state_hist_gate * projected
 
 def contactN2linkid(contact_num):
     linkids = []
@@ -138,10 +175,10 @@ def get_samples(batch_size, history_len, data_slice="train"):
     contact_id, aug_state, c_pos, contact_nums, \
     contact_id_history, aug_state_history, c_pos_history, contact_nums_history \
     = d_loader.sample_contact_ids_robot_state_history(batch_size, history_len=history_len, data_slice=data_slice)    
-    
+    aug_state_history = aug_state_history.reshape(batch_size, history_len, -1)
+
     # augmented state features
-    aug_state_aug_history = np.concatenate([aug_state, aug_state_history], axis=-1)
-    aug_state_aug_history = torch.tensor(aug_state_aug_history, device=device, dtype=torch.float32)
+    aug_state_history = torch.tensor(aug_state_history, device=device, dtype=torch.float32)
     aug_state = torch.tensor(aug_state, device=device, dtype=torch.float32)
     
     # padding mask
@@ -151,7 +188,7 @@ def get_samples(batch_size, history_len, data_slice="train"):
     # linkid embeddings
     linkids = contactN2linkid(contact_nums)
     linkids = torch.tensor(linkids, device=device, dtype=torch.long)
-    return contact_id, aug_state, aug_state_aug_history, c_pos, contact_nums, pad_mask, linkids
+    return contact_id, aug_state, aug_state_history, c_pos, contact_nums, pad_mask, linkids
 
 def compute_cpos_particles(c_pos, pad_mask, x_t, sample_size):
     # Replace your training section starting from the c_pos_x_t_tmp line
@@ -203,12 +240,12 @@ if __name__ == "__main__":
     aug_state_dim = aug_state_sample.shape[1] if aug_state_sample.ndim > 1 else 1
     aug_state_sample_history = np.array(aug_state_sample_history)
     aug_state_history_dim = aug_state_sample_history.shape[1] if aug_state_sample_history.ndim > 1 else 1
-    aug_state_dim = aug_state_dim + aug_state_history_dim
+    # aug_state_dim = aug_state_dim + aug_state_history_dim
     print(f"Augmented state dimension: {aug_state_dim}")
 
     # Define model    
     model = DiscreteFlowSeqHistory(V_total=V_total, aug_state_dim=aug_state_dim, PAD_ID=PAD_ID, num_links=7,
-                                   use_token_feats=False, use_concat=True)
+                                   use_token_feats=False, use_concat=True, use_state_history=True)
     model = model.to(device)
     
     # load the model if it exists
@@ -233,7 +270,7 @@ if __name__ == "__main__":
         for epoch in trange(num_epochs):
             # clean cpu cache
             torch.cuda.empty_cache()
-            contact_id, aug_state, aug_state_aug_history, c_pos, \
+            contact_id, aug_state, aug_history, c_pos, \
             contact_nums, pad_mask, link_ids = \
             get_samples(batch_size, his_len, data_slice="train")
 
@@ -252,8 +289,9 @@ if __name__ == "__main__":
             c_pos_x_t = compute_cpos_particles(c_pos, pad_mask, x_t, batch_size)
             
             # sample also contact positions history, retreive the pad_mask for it and fill with all 0
-            logits = model(x_t=x_t, t=t, aug_state=aug_state_aug_history, \
-                           pad_mask=pad_mask, token_link_ids=link_ids)
+            logits = model(x_t=x_t, t=t, aug_state=aug_state, \
+                           pad_mask=pad_mask, token_link_ids=link_ids, \
+                            aug_state_history=aug_history)
 
             # what is the loss
             loss = nn.functional.cross_entropy(
@@ -285,7 +323,7 @@ if __name__ == "__main__":
     # Sampling, test with 100 samples
     for i in range(num_test):
         num_samples = 400
-        contact_id, aug_state, aug_state_aug_history, c_pos, \
+        contact_id, aug_state, aug_history, c_pos, \
         contact_nums, pad_mask, link_ids = \
         get_samples(num_samples, his_len, data_slice=mode)
 
@@ -295,11 +333,11 @@ if __name__ == "__main__":
         # get the first one
         random_idx = np.random.randint(0, contact_id.shape[0])
         x_1_0 = x_1[random_idx]
-        aug_state_aug_history_0 = aug_state_aug_history[random_idx]
+        aug_state_0 = aug_state[random_idx]
 
         # repeat it such that it has the same size as x_1
         x_1 = x_1_0.unsqueeze(0).repeat(x_1.shape[0], 1)
-        aug_state_aug_history = aug_state_aug_history_0.unsqueeze(0).repeat(aug_state_aug_history.shape[0], 1)
+        aug_state = aug_state_0.unsqueeze(0).repeat(aug_state.shape[0], 1)
 
         # retrieve the ground truth contact positions
         x_1_0_mask = x_1_0 == PAD_ID
@@ -336,8 +374,9 @@ if __name__ == "__main__":
         with torch.no_grad():
             while t < 1.0 - 1e-3:
                 t_tensor = torch.full((num_samples,), t, device=device)
-                logits = model(x_t=x_t, t=t_tensor, aug_state=aug_state_aug_history, \
-                               pad_mask=pad_mask, token_link_ids=link_ids)
+                logits = model(x_t=x_t, t=t_tensor, aug_state=aug_state, \
+                               pad_mask=pad_mask, token_link_ids=link_ids, \
+                               aug_state_history=aug_history)
 
                 # CRITICAL: Mask PAD token logits to prevent predicting PAD where it shouldn't be
                 logits[:, :, PAD_ID] = torch.where(
