@@ -9,6 +9,7 @@ import os
 import jax
 from jax import numpy as jnp
 jax.config.update("jax_enable_x64", True)
+# make sure jax uses cpu
 
 def get_geom_ids_using_mesh(model, mesh_name):
     # Get the mesh ID from the name
@@ -392,6 +393,34 @@ class MeshSampler:
         file_name = f"{xml_path}/mesh_data_dict.npy"
         np.save(file_name, self.data_dict)
         print(f"Mesh data saved to {file_name}")
+
+        # remove all the jax arrays in the data_dict and save another copy
+        data_dict_jax_removed = self.data_dict.copy()
+        keys_to_remove = [key for key in self.data_dict.keys() if key.endswith('_jax')]
+        for key in keys_to_remove:
+            del data_dict_jax_removed[key]
+        # remove the jax arrays in the nested dicts too
+        keys_for_mesh = [key for key in self.data_dict.keys() if key in self.mesh_names]
+        for mesh_key in keys_for_mesh:
+            nested_dict = data_dict_jax_removed[mesh_key].copy()
+            nested_keys_to_remove = [key for key in nested_dict.keys() if key.endswith('_jax')]
+            for nested_key in nested_keys_to_remove:
+                del nested_dict[nested_key]
+            data_dict_jax_removed[mesh_key] = nested_dict      
+        for i in range(len(record_mesh_names)):
+            mesh_name_ = record_mesh_names[i]
+            data_dict_jax_removed[mesh_name_]["global_start_end_indices"] = np.array(global_start_end_indices[i]).astype(np.int32)
+        data_dict_jax_removed["globalid2localid"] = np.array(globalid2localid).astype(np.int32)
+        data_dict_jax_removed["global_num_samples"] = np.array(global_num_samples).astype(np.int32)
+        data_dict_jax_removed["global_start_end_indices"] = np.array(global_start_end_indices).astype(np.int32)
+
+        file_name = f"{xml_path}/mesh_data_dict_no_jax.npy"
+        np.save(file_name, data_dict_jax_removed)
+        print(self.data_dict.keys())
+        print(data_dict_jax_removed.keys())
+        for mesh_key in keys_for_mesh:
+            print(f"Mesh {mesh_key} keys:", self.data_dict[mesh_key].keys(), "vs", data_dict_jax_removed[mesh_key].keys())
+        print(f"Mesh data without jax arrays saved to {file_name}")
 
     def global2local_id(self, global_ids: jnp.ndarray):
         mapping = self.data_dict["globalid2localid"]
@@ -997,7 +1026,7 @@ if __name__ == "__main__":
     model = mujoco.MjModel.from_xml_path(f"{xml_path}")
     data = mujoco.MjData(model)
     mesh_sampler = MeshSampler(model, data, init_mesh_data=True)
-    vis_mesh_body_name = "link6"
+    vis_mesh_body_name = "link7"
     n_mesh = len(mesh_sampler.data_dict["body_names_mapping"][vis_mesh_body_name]["mesh_name"])
     if n_mesh > 1:
         idx = np.random.randint(0, n_mesh)
