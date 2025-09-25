@@ -9,6 +9,7 @@ from tqdm import trange
 from pathlib import Path
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
+from h5_torch_dataset import H5Dataset, make_dataloaders
 
 # You choose these IDs; example uses “append-on-top” (no shift of real IDs):
 # real tokens: 0..V_real-1, PAD = V_real
@@ -161,7 +162,7 @@ def contactN2linkid(contact_num):
     linkids = []
     for i in range(len(contact_num)):
         c_n = contact_num[i]
-        linkid = np.zeros(10, dtype=int)
+        linkid = np.ones(10, dtype=int) * -1
         for j in range(len(c_n)):
             n_j = c_n[j]
             for n in range(n_j):
@@ -205,13 +206,91 @@ def compute_cpos_particles(c_pos, pad_mask, x_t, sample_size):
     c_pos_x_t_tmp[~pos_pad] = retrieved_tensor.flatten()
     return c_pos_x_t_tmp
 
+def ss2links(sampling_space, robot_name="kuka_iiwa"):
+    if robot_name == "kuka_iiwa":
+        num_links = 7
+        link_meshes = [1, 2, 1, 2, 1, 2, 1]
+        assert len(link_meshes) == num_links, "Number of links does not match length of link_meshes"
+        link_ranges = []
+        for i in range(num_links):
+            mesh_count = link_meshes[i]
+            start_i = sum(link_meshes[:i])
+            end_i = start_i + mesh_count
+            start_idx = sampling_space[start_i][0]
+            end_idx = sampling_space[end_i - 1][1]
+            link_ranges.append((start_idx, end_idx))
+    else:
+        raise NotImplementedError("Only kuka_iiwa is implemented")
+    return link_ranges
+
+def generate_random_samples(link_ids, x_1, ss_links):
+    random_samples = torch.zeros_like(x_1)
+    for i in range(x_1.shape[0]):
+        num_c = (link_ids[i] >= 0).sum().item()
+        for j in range(num_c):
+            link_id = link_ids[i, j].item()
+            link_range = ss_links[link_id]
+            random_samples[i, j] = torch.randint(low=link_range[0], high=link_range[1], size=(1,))
+    return random_samples
+
+def batch_clamp(x_t, link_ids, ss_links):
+    x_t_clamped = x_t.clone()
+    for i in range(x_t.shape[0]):
+        num_c = (link_ids[i] >= 0).sum().item()
+        for j in range(num_c):
+            link_id = link_ids[i, j].item()
+            link_range = ss_links[link_id]
+            x_t_clamped[i, j] = torch.clamp(x_t[i, j], min=link_range[0], max=link_range[1]-1)
+    return x_t_clamped
+
+def get_validation_samples(num_samples, his_len, mode="validate"):
+    contact_id, aug_state, aug_history, c_pos, \
+    contact_nums, pad_mask, link_ids = \
+    get_samples(num_samples, his_len, data_slice=mode)
+
+    x_1 = contact_id
+    x_1 = x_1.to(device)
+
+    # get the first one
+    random_idx = np.random.randint(0, contact_id.shape[0])
+    x_1_0 = x_1[random_idx]
+    aug_state_0 = aug_state[random_idx]
+
+    # select the link ids
+    link_ids_0 = link_ids[random_idx]
+    
+    # select the augmented state history
+    aug_history_0 = aug_history[random_idx]
+
+    # select the contact_nums
+    contact_nums_0 = contact_nums[random_idx]
+
+    # select the pad mask
+    pad_mask_0 = pad_mask[random_idx]
+
+    # select the contact positions
+    c_pos_0 = c_pos[random_idx]
+
+    # repeat it such that it has the same size as x_1
+    x_1 = x_1_0.unsqueeze(0).repeat(x_1.shape[0], 1)
+    aug_state = aug_state_0.unsqueeze(0).repeat(aug_state.shape[0], 1)
+    link_ids = link_ids_0.unsqueeze(0).repeat(link_ids.shape[0], 1)
+    aug_history = aug_history_0.unsqueeze(0).repeat(aug_history.shape[0], 1, 1)
+    contact_nums = contact_nums_0.unsqueeze(0).repeat(contact_nums.shape[0], 1)
+    pad_mask = pad_mask_0.unsqueeze(0).repeat(pad_mask.shape[0], 1)
+    c_pos = c_pos_0.unsqueeze(0).repeat(c_pos.shape[0], 1, 1)
+    return x_1, aug_state, aug_history, c_pos, contact_nums, pad_mask, link_ids
+
 if __name__ == "__main__":
     # Make sure JAX uses CPU
     os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
     # Load the dataset
-    file_name = "dataset_batch_1_20eps"
-    dir_name = "data-link7-2-contact_v3"
+    num_contacts = 5
+
+    # Data loader
+    file_name = "dataset_batch_1_200eps"
+    dir_name = f"data-link7-{num_contacts}contact_100_v5"
     d_loader = DataLoader(file_name, dir_name)
     
     # Get the device
@@ -250,7 +329,7 @@ if __name__ == "__main__":
     
     # load the model if it exists
     model_dir = (Path(__file__).resolve().parent / "models").as_posix()
-    model_name = "low_level_discrete_flow_2contacts"
+    model_name = f"low_level_discrete_flow_{num_contacts}contacts"
     model_path = f"{model_dir}/{model_name}.pth"
 
     if use_wnb:
@@ -259,7 +338,8 @@ if __name__ == "__main__":
     
     # TODO: generate proper sampling space for each link
     sampling_space = d_loader.data_dict["global_start_end_indices"]
-    link_7_sampling_space = sampling_space[-1]
+    ss_links = ss2links(sampling_space, robot_name="kuka_iiwa")
+    # link_7_sampling_space = sampling_space[-1]
     if os.path.exists(model_path):
         print(f"========================== LOADING MODEL FROM {model_path} ==========================")
         model.load_state_dict(torch.load(model_path))
@@ -277,7 +357,8 @@ if __name__ == "__main__":
             x_1 = contact_id
             x_1 = x_1.to(device)
 
-            x_0 = torch.randint(low=link_7_sampling_space[0], high=link_7_sampling_space[1], size=x_1.shape, device=device)
+            x_0 = generate_random_samples(link_ids, x_1, ss_links)
+            # x_0 = torch.randint(low=link_7_sampling_space[0], high=link_7_sampling_space[1], size=x_1.shape, device=device)
 
             # fill x_0 with <PAD_ID>
             x_0[pad_mask] = PAD_ID
@@ -291,7 +372,7 @@ if __name__ == "__main__":
             # sample also contact positions history, retreive the pad_mask for it and fill with all 0
             logits = model(x_t=x_t, t=t, aug_state=aug_state, \
                            pad_mask=pad_mask, token_link_ids=link_ids, \
-                            aug_state_history=aug_history)
+                           aug_state_history=aug_history)
 
             # what is the loss
             loss = nn.functional.cross_entropy(
@@ -315,14 +396,11 @@ if __name__ == "__main__":
     num_test = 100
     correct_total = 0
     avg_err = 0.0
-    vis_result = False
+    vis_result = True
     mode = "train"
-    min_val = int(link_7_sampling_space[0])
-    max_val = int(link_7_sampling_space[1]) - 1
-    
+    num_samples = 400
     # Sampling, test with 100 samples
     for i in range(num_test):
-        num_samples = 400
         contact_id, aug_state, aug_history, c_pos, \
         contact_nums, pad_mask, link_ids = \
         get_samples(num_samples, his_len, data_slice=mode)
@@ -335,9 +413,17 @@ if __name__ == "__main__":
         x_1_0 = x_1[random_idx]
         aug_state_0 = aug_state[random_idx]
 
+        # select the link ids
+        link_ids_0 = link_ids[random_idx]
+        
+        # select the augmented state history
+        aug_history_0 = aug_history[random_idx]
+
         # repeat it such that it has the same size as x_1
         x_1 = x_1_0.unsqueeze(0).repeat(x_1.shape[0], 1)
         aug_state = aug_state_0.unsqueeze(0).repeat(aug_state.shape[0], 1)
+        link_ids = link_ids_0.unsqueeze(0).repeat(link_ids.shape[0], 1)
+        aug_history = aug_history_0.unsqueeze(0).repeat(aug_history.shape[0], 1, 1)
 
         # retrieve the ground truth contact positions
         x_1_0_mask = x_1_0 == PAD_ID
@@ -351,7 +437,7 @@ if __name__ == "__main__":
             continue
 
         # generate random x_t
-        x_t = torch.randint(low=link_7_sampling_space[0], high=link_7_sampling_space[1], size=(contact_id.shape[0], contact_id.shape[1]), device=device)
+        x_t = generate_random_samples(link_ids, x_1, ss_links)
         x_t[x_1_mask] = PAD_ID
         pad_mask = x_1_mask
 
@@ -402,8 +488,9 @@ if __name__ == "__main__":
                 # Sample new tokens
                 x_t_new = torch.distributions.Categorical(probs=updated_probs).sample()
                 
-                # limit the sampling to the link 7 sampling space
-                x_t_new = torch.clamp(x_t_new, min=min_val, max=max_val)
+                # # limit the sampling to the link 7 sampling space
+                # x_t_new = torch.clamp(x_t_new, min=min_val, max=max_val)
+                # x_t_new = batch_clamp(x_t_new, link_ids, ss_links)
 
                 # Preserve existing PAD tokens (crucial!)
                 x_t = torch.where(pad_mask, PAD_ID, x_t_new)
@@ -458,35 +545,21 @@ if __name__ == "__main__":
         from scipy import stats
         final_contact_positions_ = final_contact_positions.reshape(num_samples, n_contacts, 3)
         ground_truth_contact_positions_ = ground_truth_contact_positions.reshape(num_samples, n_contacts, 3)
-        final_contact_positions_mode, mode_counts = stats.mode(final_contact_positions_, axis=0, keepdims=False)
-        final_contact_positions_mean = final_contact_positions_.mean(axis=0)
-
-        # select the second frequency mode, first remove the final contact positions mode
-        mode_mask = final_contact_positions_ != final_contact_positions_mode
-        final_contact_positions_remove_mode = final_contact_positions_[mode_mask]
-        find_contact_positions_second_mode, second_mode_counts = stats.mode(final_contact_positions_remove_mode.reshape(-1, 3), axis=0, keepdims=False)
-
         # Compare the mode and ground truth
         print("Ground Truth Contact Positions:", ground_truth_contact_positions_[0])
-        print("Final Contact Positions Mode:", final_contact_positions_mode)
-        print("Second frequent Contact Positions:", find_contact_positions_second_mode)
-        print("Final Contact Positions Mean:", final_contact_positions_mean)
-        print("Mode Counts:", mode_counts, "Second Mode Counts:", second_mode_counts, " Total Counts: ", num_samples)
-        print("ERROR mode to ground truth:", np.mean(final_contact_positions_mode - ground_truth_contact_positions_))
-        final_modes_mode_num = [stats.mode(final_contact_positions_[:, j, :], axis=0) for j in range(n_contacts)]
 
         # Global mode
         final_contact_positions_flat_ = final_contact_positions_.reshape(-1, 3)
-        final_contact_positions_mode_global, mode_counts_global = stats.mode(final_contact_positions_flat_, axis=0, keepdims=False)
-        mode_mask_global = final_contact_positions_flat_ != final_contact_positions_mode_global
-        final_contact_positions_remove_mode_global = final_contact_positions_flat_[mode_mask_global]
-        find_contact_positions_second_mode_global, second_mode_counts_global = stats.mode(final_contact_positions_remove_mode_global.reshape(-1, 3), axis=0, keepdims=False)
-        print("Global Mode:", final_contact_positions_mode_global, "Counts:", mode_counts_global)
-        print("Global Second frequent Contact Positions:", find_contact_positions_second_mode_global, "Counts:", second_mode_counts_global)
-                    
-        # compute the predicted accuracy
-        if final_contact_positions_mode_global in ground_truth_contact_positions_[0] and \
-           find_contact_positions_second_mode_global in ground_truth_contact_positions_[0]:
+        check_num = 0
+        for i in range(num_contacts):
+            contact_positions_mode_global, mode_counts_global = stats.mode(final_contact_positions_flat_, axis=0, keepdims=False)
+            print(f"Global Mode for contact {i}:", contact_positions_mode_global, "Counts:", mode_counts_global)
+            mode_mask_global = final_contact_positions_flat_ != contact_positions_mode_global
+            final_contact_positions_flat_ = final_contact_positions_flat_[mode_mask_global]
+            final_contact_positions_flat_ = final_contact_positions_flat_.reshape(-1, 3)
+            if contact_positions_mode_global in ground_truth_contact_positions_[0]:
+                check_num += 1
+        if check_num == n_contacts:
             correct_total += 1
 
         if vis_result:

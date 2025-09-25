@@ -9,7 +9,7 @@ _mesh_names_ = ["link_1", "link_2_orange", "link_2_grey", "link_3", "link_4_oran
                 "link_6_orange", "link_6_grey", "link_7"]
 class DataLoader:
     def __init__(self, file_name, dir_name, limited_dim: int = -1, robot_name: str = "kuka_iiwa_14", nn_num: int = 20,
-                 max_num_contacts: int = 10):
+                 max_num_contacts: int = 10, only_mesh: bool = False):
         data_path = (Path(__file__).resolve().parent / "dataset" / f"{dir_name}").as_posix()
         self.preprocessed_contact_data_path = f"{data_path}/preprocessed_{file_name}.npz"
         self.data = np.load(f"{data_path}/{file_name}.npz")
@@ -22,15 +22,17 @@ class DataLoader:
         self.nn_num = nn_num
         self.max_num_contacts = max_num_contacts
         self._prepare_mesh_data(robot_name)
-        self._prepare_contact_states()
-        self._prepare_joint_data(limited_dim)
-        self._prepare_distance_table()
-        
+        if not only_mesh:
+            self._prepare_contact_states()
+            self._prepare_joint_data(limited_dim)
+            self._prepare_distance_table()
+        print("DataLoader initialized.")
+
     def _prepare_mesh_data(self, robot_name: str = "kuka_iiwa_14"):
         xml_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
-        self.data_dict = np.load(f"{xml_path}/mesh_data_dict.npy", allow_pickle=True).item()
-        print("Mesh data loaded from mesh_data.npy")
-    
+        self.data_dict = np.load(f"{xml_path}/mesh_data_dict_no_jax.npy", allow_pickle=True).item()
+        print("Mesh data loaded from mesh_data_dict_no_jax.npy")
+
     def _prepare_contact_states(self):
         if self.preprocessed_contact_data_path is None or not os.path.exists(self.preprocessed_contact_data_path):
             print("=================== No preprocessed data found. Preparing contact states")
@@ -154,8 +156,10 @@ class DataLoader:
             self.eps = int(data["eps"])
             self.ep_len = int(data["ep_len"])
             print("=================== Loaded the preprocessed data")
-        self.training_steps = [0, self.total_steps // 10 * 9]  # take 9/10 data as training dataset
-        self.validation_steps = [self.total_steps // 10 * 9, self.total_steps]  # take 1/10 data as validation dataset
+        # self.training_steps = [0, self.total_steps // 10 * 9]  # take 9/10 data as training dataset
+        # self.validation_steps = [self.total_steps // 10 * 9, self.total_steps]  # take 1/10 data as validation dataset
+        self.training_steps = [1000, 1800]
+        self.validation_steps = [1800, 2000]        
         print(self.training_steps, self.validation_steps)
         print("=================== Prepared training and validation steps finished")
 
@@ -175,6 +179,12 @@ class DataLoader:
         self.joint_tau_cmd_std = self.joint_tau_cmd_data.std(axis=0)
         self.joint_tau_ext_gt_mean = self.joint_tau_ext_gt_data.mean(axis=0)
         self.joint_tau_ext_gt_std = self.joint_tau_ext_gt_data.std(axis=0)
+        
+        # normalize the joint states with the mean and variance computed from the dataset
+        self.joint_pos_data_norm = (self.joint_pos_data - self.joint_pos_mean) / self.joint_pos_std
+        self.joint_vel_data_norm = (self.joint_vel_data - self.joint_vel_mean) / self.joint_vel_std
+        self.joint_tau_cmd_data_norm = (self.joint_tau_cmd_data - self.joint_tau_cmd_mean) / self.joint_tau_cmd_std
+        self.joint_tau_ext_gt_data_norm = (self.joint_tau_ext_gt_data - self.joint_tau_ext_gt_mean) / self.joint_tau_ext_gt_std
         print("=================== Prepared joint data finished")
 
     def _prepare_distance_table(self):
@@ -228,7 +238,7 @@ class DataLoader:
         joint_tau_cmd = torch.tensor(joint_tau_cmd, dtype=torch.float32)
         joint_tau_ext_gt = torch.tensor(joint_tau_ext_gt, dtype=torch.float32)
         aug_state = torch.cat((joint_pos, joint_vel, joint_tau_cmd, joint_tau_ext_gt), dim=-1)
-        
+
         # corresponding contact positions
         contact_positions = self.contact_positions[random_indices]
         contact_forces = self.contact_forces[random_indices]
@@ -459,7 +469,7 @@ class DataLoader:
         return global_idxs
 
 if __name__ == "__main__":
-    file_name = "dataset_batch_1_1000eps"
+    file_name = "dataset_batch_1_20eps"
     dir_name = "data-link7-2-contact_v3"
     d_loader = DataLoader(file_name, dir_name)
     batch_size = 1000
