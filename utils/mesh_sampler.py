@@ -134,53 +134,116 @@ class MeshSampler:
     def _load_feasible_region(self, robot_name: str = "kuka_iiwa_14"):
         """
         Load feasible region indices for each mesh.
+        对 KUKA：从预先计算好的 xxx_valid_face_indices.npy 里读
+        对 Panda：自动把所有碰撞 mesh 的所有面都视为可行区域 [0, -1]
         """
         index_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
+        self.feasible_region_idxes = {}
+
         if robot_name == "kuka_iiwa_14":
-            feasible_mesh_names = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
-                    "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
-            self.feasible_region_idxes = {}
+            feasible_mesh_names = [
+                "link_1", "link_2_grey", "link_2_orange", "link_3",
+                "link_4_grey", "link_4_orange", "link_5",
+                "link_6_grey", "link_6_orange", "link_7",
+            ]
             for mesh_name in feasible_mesh_names:
                 file_name = f"{index_path}/{mesh_name}_valid_face_indices.npy"
                 if os.path.exists(file_name):
-                    self.feasible_region_idxes[mesh_name] = np.load(f"{index_path}/{mesh_name}_valid_face_indices.npy")
+                    self.feasible_region_idxes[mesh_name] = np.load(file_name)
                 else:
+                    # [0, -1] 的约定在 _init_mesh_data 里会被解释为“用全部 faces”
                     self.feasible_region_idxes[mesh_name] = [0, -1]
+
+        elif robot_name == "franka_emika_panda":
+            # 对 Panda：自动遍历所有 mesh，只保留“碰撞 mesh”，并把所有面都视为可行区域
+            for i in range(self.model.nmesh):
+                mesh_name = self.model.mesh(i).name
+                # 利用 _skip_mesh 过滤掉不想用的 mesh（base、手指、纯视觉 mesh 等）
+                if self._skip_mesh(mesh_name):
+                    continue
+                # 可行区域 = 所有面
+                self.feasible_region_idxes[mesh_name] = [0, -1]
+
         else:
-            raise NotImplementedError(f"Robot {robot_name} not implemented for loading feasible regions.")
+            # 其他机器人暂时不做特殊处理
+            self.feasible_region_idxes = {}
 
     def _load_boundary_region(self, robot_name: str = "kuka_iiwa_14"):
         """
         Load boundary region indices for each mesh.
+        对 Panda 暂时不做边界剔除，给一个空 dict 即可。
         """
         index_path = (Path(__file__).resolve().parent / ".." / f"{robot_name}/mesh_data").as_posix()
+
         if robot_name == "kuka_iiwa_14":
-            feasible_mesh_names = ["link_1", "link_2_grey", "link_2_orange", "link_3", "link_4_grey",
-                    "link_4_orange", "link_5", "link_6_grey", "link_6_orange", "link_7"]
+            feasible_mesh_names = [
+                "link_1", "link_2_grey", "link_2_orange", "link_3",
+                "link_4_grey", "link_4_orange", "link_5",
+                "link_6_grey", "link_6_orange", "link_7",
+            ]
             self.boundary_region_idxes = {}
             for mesh_name in feasible_mesh_names:
-                self.boundary_region_idxes[mesh_name] = np.load(f"{index_path}/{mesh_name}_non_manifold_face_indices.npy")
+                self.boundary_region_idxes[mesh_name] = np.load(
+                    f"{index_path}/{mesh_name}_non_manifold_face_indices.npy"
+                )
+
+        elif robot_name == "franka_emika_panda":
+            # 暂时不使用边界信息
+            self.boundary_region_idxes = {}
+
         else:
-            raise NotImplementedError(f"Robot {robot_name} not implemented for loading boundary regions.")
+            self.boundary_region_idxes = {}
 
     def _skip_mesh(self, mesh_name: str) -> bool:
         """
         Determine whether to skip a mesh based on its name.
         """
         if self.robot_name == "kuka_iiwa_14":
-            return mesh_name == "band" or mesh_name == "kuka" or mesh_name == "link_0"
+            # 原来的逻辑保留
+            return mesh_name in ["band", "kuka", "link_0"]
+
+        elif self.robot_name == "franka_emika_panda":
+            # Panda：只在碰撞 mesh 上采样
+            # 碰撞 mesh：link0_c, link1_c, ..., link7_c, hand_c, link5_c0/c1/c2
+            # 其余（各种 visual mesh、finger 等）全部跳过
+            if mesh_name is None:
+                return True
+
+            # 手指碰撞 / 视觉 mesh 名一般是 finger_0, finger_1 之类，直接跳过
+            if mesh_name.startswith("finger"):
+                return True
+
+            # 视觉 mesh（link1, link3_0, hand_0 等）没有 "_c" 后缀，也跳过
+            # 我们只保留末尾为 "_c" 或特定的 link5_c0/1/2
+            if mesh_name.endswith("_c"):
+                return False
+            if mesh_name in ["link5_c0", "link5_c1", "link5_c2"]:
+                return False
+
+            # 其他情况一律不参与接触采样
+            return True
+
         else:
-            raise NotImplementedError(f"Robot {self.robot_name} not implemented for skipping meshes.")
+            # 其他机器人先全部不过滤
+            return False
 
     def _check_body_name(self, body_name: str):
         """
         Check if the body name is valid.
         """
         if self.robot_name == "kuka_iiwa_14":
-            valid_body_names = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"] # we would not allow to sample from link 7
+            valid_body_names = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
             return body_name in valid_body_names
+
+        elif self.robot_name == "franka_emika_panda":
+            # Panda XML 里的 body 名：link0, link1, ..., link7, hand, left_finger, right_finger
+            # 我们只在 link1~link7 上采样（不包括底座 link0 和手爪/手指）
+            valid_body_names = ["link1", "link2", "link3", "link4", "link5", "link6", "link7"]
+            return body_name in valid_body_names
+
         else:
-            raise NotImplementedError(f"Robot {self.robot_name} not implemented for checking body names.")
+            # 其他机器人暂时不过滤
+            return True
 
     def _init_mesh_data(self):
         """
@@ -286,17 +349,26 @@ class MeshSampler:
 
             if mesh_name in self.feasible_region_idxes.keys():
                 global_geom_ids.extend(geom_ids * len(face_center_list))
-                global_mesh_ids.extend(mesh_ids * len(face_center_list)) # Note that all mesh_ids is is 
-                                                                         # a list with only one element,
-                                                                         # if the robot changes, we need to check
+                global_mesh_ids.extend(mesh_ids * len(face_center_list))
                 global_mesh_names.extend(mesh_names * len(face_center_list))
                 global_normal_list.extend(normal_list)
                 global_face_center_list.extend(face_center_list)
                 global_face_vertices_list.extend(face_vertices_list)
                 global_rot_mat_list.extend(rot_mat_list)
                 global_vis_face_list.extend(vis_face_list)
-                
-                linkname = mesh_names_2_body_names[mesh_name]
+
+                # 根据不同机器人来决定“globalid → link name”的映射
+                if self.robot_name == "kuka_iiwa_14":
+                    # 原来的 KUKA 对应表
+                    linkname = mesh_names_2_body_names[mesh_name]
+                else:
+                    # 对 Panda：通过 geom 的 bodyid 自动推导出 body name
+                    if len(geom_ids) == 0:
+                        linkname = "unknown"
+                    else:
+                        body_id = self.model.geom_bodyid[geom_ids[0]]
+                        linkname = self.model.body(body_id).name
+
                 globalid2linkname.extend([linkname] * len(face_center_list))
                 globalid2geomname.extend(geom_names * len(face_center_list))
                 globalid2localid.extend(list(range(len(face_center_list))))
@@ -363,24 +435,39 @@ class MeshSampler:
         # a single body can include multiple meshes, so we need to account for that
         body_names = [self.model.body(i).name for i in range(self.model.nbody) if "link" in self.model.body(i).name]
         body_names_mapping = {}
-        # mesh_names_mapping = {}
         for body_name in body_names:
             body_id = self.model.body(body_name).id
             geom_ids = [i for i in range(self.model.ngeom) if self.model.geom_bodyid[i] == body_id]
             if len(geom_ids) == 0:
                 raise ValueError(f"No geoms found for body '{body_name}'")
+
             mesh_ids = [self.model.geom_dataid[i] for i in geom_ids]
             mesh_names = [self.mesh_names[i] for i in mesh_ids if i != -1]
             if len(mesh_names) == 0:
-                raise ValueError(f"No meshes found for body '{body_name}'")    
-            # mesh_name = mesh_names
+                raise ValueError(f"No meshes found for body '{body_name}'")
+
             geom_names = [self.model.geom(i).name for i in geom_ids]
-            
-            # Remove the kuka, and band meshes
-            if body_name == "link3" or body_name == "link5":
-                mesh_names = [mesh_names[0]]
-                mesh_ids = [mesh_ids[0]]
-                geom_ids = [geom_ids[0]]
+
+            # ✅ 新增：只保留那些已经在 data_dict 里的 mesh
+            # 也就是没被 _skip_mesh 跳过，真正参与接触采样的碰撞 mesh
+            valid_indices = [k for k, name in enumerate(mesh_names) if name in self.data_dict]
+            if len(valid_indices) == 0:
+                # 这个 body 没有任何用于接触的 mesh，直接跳过或给个提示
+                # print(f"[MeshSampler] body '{body_name}' has no valid meshes for sampling, skipping.")
+                continue
+
+            mesh_names = [mesh_names[k] for k in valid_indices]
+            mesh_ids = [mesh_ids[k] for k in valid_indices]
+            geom_ids = [geom_ids[k] for k in valid_indices]
+            # geom_names 也可以同步过滤，如果你后面需要的话
+            # geom_names = [geom_names[k] for k in valid_indices]
+
+            # 原来只对 KUKA 用的特判，避免影响 Panda
+            if self.robot_name == "kuka_iiwa_14":
+                if body_name == "link3" or body_name == "link5":
+                    mesh_names = [mesh_names[0]]
+                    mesh_ids = [mesh_ids[0]]
+                    geom_ids = [geom_ids[0]]
 
             body_names_mapping[body_name] = {
                 "mesh_name": mesh_names,
@@ -839,24 +926,31 @@ class MeshSampler:
             
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
         
-    def compute_equivalent_wrenches(self, contact_poss_geom: list, rots_mat_contact_geom: list, normal_vecs_geom: list, sample_body_name: str, geom_id: int, ext_f_norm: float):
+    def compute_equivalent_wrenches(self, contact_poss_geom: list, rots_mat_contact_geom: list,
+                                    normal_vecs_geom: list, sample_body_name: str,
+                                    geom_id: int, ext_f_norm: float):
         model = self.model
         data = self.data
         geom_pos_world = data.geom_xpos[geom_id]        # shape (3,)
-        rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)    
+        rot_mat_geom_world = data.geom_xmat[geom_id].reshape(3, 3)
         com_pos_world = data.xpos[model.body(sample_body_name).id]
         rot_mat_com_world = data.xmat[model.body(sample_body_name).id].reshape(3, 3)
+
         equi_ext_fs = []
         equi_ext_f_poss = []
         equi_ext_wrenchs = []
-        rot_mats_contact_world = []
         contact_poss_world = []
         contact_poss_com = []
+        rot_mats_contact_world = []
         rot_mats_contact_com = []
         jacobian_contacts = []
         jacobian_bodies = []
         ext_wrenches = []
-        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{sample_body_name}_dummy_site1") # TODO: change the hardcode case to fit the number of contact points
+
+        # 尝试查找 dummy site，如果不存在（返回 -1），后面就不用 site
+        site_name = f"{sample_body_name}_dummy_site1"
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+
         for i in range(len(rots_mat_contact_geom)):
             rot_mat_contact_geom = rots_mat_contact_geom[i]
             rot_mat_contact_world = rot_mat_geom_world @ rot_mat_contact_geom
@@ -876,28 +970,38 @@ class MeshSampler:
             com_to_contact_world = contact_pos_world - com_pos_world
             equi_ext_wrench = compute_equivalent_wrench(ext_wrench, com_to_contact_world)
             ext_wrenches.append(ext_wrench)
-            
-            # Append the data.
+
+            # Append data
             equi_ext_fs.append(ext_f)
             equi_ext_f_poss.append(com_pos_world)
             equi_ext_wrenchs.append(equi_ext_wrench)
-            rot_mats_contact_world.append(rot_mat_contact_world)
             contact_poss_world.append(contact_pos_world)
             contact_poss_com.append(contact_pos_com)
+            rot_mats_contact_world.append(rot_mat_contact_world)
             rot_mats_contact_com.append(rot_mat_contact_com)
-            
-            # Update the site position and quaternion for computing jacobian
-            model.site_pos[site_id] = contact_pos_com
-            rot = R.from_matrix(rot_mat_contact_com)
-            quat_mujoco = rot.as_quat(scalar_first=True)
-            model.site_quat[site_id] = quat_mujoco
-            mujoco.mj_forward(model, data) # update kinematics
-            jac_site_contact = np.zeros((6, model.nv))
-            mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
-            jacobian_contacts.append(jac_site_contact)    
+
+            # 计算 body 的 Jacobian（质心处）
             jac_body = np.zeros((6, model.nv))
-            mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(f"{sample_body_name}").id)
-            jacobian_bodies.append(jac_body)            
+            mujoco.mj_jacBody(model, data, jac_body[:3], jac_body[3:], model.body(sample_body_name).id)
+            jacobian_bodies.append(jac_body)
+
+            # 计算 contact 处的 Jacobian
+            # 如果有对应的 site，就用 mj_jacSite；如果没有，就用 body 的 Jacobian 近似
+            if site_id >= 0 and model.nsite > 0:
+                model.site_pos[site_id] = contact_pos_com
+                rot = R.from_matrix(rot_mat_contact_com)
+                quat_mujoco = rot.as_quat(scalar_first=True)
+                model.site_quat[site_id] = quat_mujoco
+                mujoco.mj_forward(model, data)  # update kinematics
+
+                jac_site_contact = np.zeros((6, model.nv))
+                mujoco.mj_jacSite(model, data, jac_site_contact[:3], jac_site_contact[3:], site_id)
+            else:
+                # 没有 site（比如 Panda 模型），就用 body Jacobian 作为近似
+                jac_site_contact = jac_body.copy()
+
+            jacobian_contacts.append(jac_site_contact)
+
         return equi_ext_f_poss, equi_ext_wrenchs, jacobian_bodies, contact_poss_world, ext_wrenches, jacobian_contacts
     
     def update_model_data(self, model, data):

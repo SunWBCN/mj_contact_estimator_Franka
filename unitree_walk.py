@@ -14,7 +14,7 @@ if __name__ == "__main__":
     # Constants
     CONTROL_FREQUENCY_IN_HZ = 50
     SIMULATION_FREQUENCY_IN_HZ = 200
-    VELOCITY_COMMAND = (0.0, 0.0, 1.0)  # (x, y, yaw), min and max values are (-1.0, 1.0)
+    VELOCITY_COMMAND = (1.0, 1.0, -1.0)  # (x, y, yaw), min and max values are (-1.0, 1.0)
     P_GAIN = 20.0
     D_GAIN = 0.5
     ACTION_SCALING = 0.25
@@ -145,6 +145,6 @@ if __name__ == "__main__":
             previous_action = np.zeros(12)
             viewer.render(data)
         steps += 1
-        if steps > 200:
+        if steps > 100000:
             break
         
